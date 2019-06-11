@@ -1,7 +1,4 @@
-package goasset
-
-var assetTmpl = `
-package {{.PackageName}}
+package goassets
 
 import (
 	"bytes"
@@ -12,33 +9,52 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
 
-var assets = map[string]string{
-	{{range $k, $v := .Items}}
-	"{{$k}}": ` + "`" +
-	`{{$v}}` + "`" + `,
-	{{end}}
+type myasset struct {
+	path    string
+	modTime time.Time
+	data    string
 }
 
-func Keys() []string {
-	var assetKeys []string
+func AssetsPaths() []string {
+	var assetsPaths []string
 
-	for key, _ := range assets {
-		assetKeys = append(assetKeys, key)
+	for path, _ := range assets.cache {
+		assetsPaths = append(assetsPaths, path)
 	}
 
-	return assetKeys
+	return assetsPaths
 }
 
-func Get(name string) ([]byte, error) {
-	if val, ok := assets[name]; ok {
-		return decodeAsset(val)
+func getAsset(name string) ([]byte, error) {
+	name = filepath.ToSlash(name)
+	for _, asset := range assets {
+		if strings.EqualFold(name, asset.path) {
+			data, err := decodeAsset(asset.data)
+			if err != nil {
+				return nil, err
+			}
+
+			return data, nil
+		}
 	}
 
 	return nil, os.ErrNotExist
+}
+
+func readAsset(name string) (myasset, error) {
+	name = filepath.ToSlash(name)
+	for _, asset := range assets {
+		if strings.EqualFold(name, asset.path) {
+			return asset, nil
+		}
+	}
+
+	return myasset{}, os.ErrNotExist
 }
 
 func decodeAsset(assetData string) ([]byte, error) {
@@ -150,18 +166,22 @@ func (this *AssetFS) Open(name string) (http.File, error) {
 	if len(key) > 0 && key[0] == '/' {
 		key = key[1:]
 	}
-	data, err := Get(key)
+	asset, err := readAsset(key)
 	if err != nil {
 		return nil, err
 	}
 
-	assetFile := NewAssetFile(key, data, time.Now())
+	data, err := decodeAsset(asset.data)
+	if err != nil {
+		return nil, err
+	}
+
+	assetFile := NewAssetFile(key, data, asset.modTime)
 	this.files[name] = assetFile
 
 	return assetFile, nil
 }
 
-func Dir(path string) *AssetFS {
+func AssetsDir(path string) *AssetFS {
 	return NewAssetFS(path)
 }
-`
