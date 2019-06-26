@@ -2,74 +2,16 @@ package goassets
 
 import (
 	"bytes"
-	"compress/gzip"
-	"encoding/base64"
 	"errors"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
+
+	"github.com/zhuomouren/gohelpers/gostring"
 )
-
-type myasset struct {
-	path    string
-	modTime time.Time
-	data    string
-}
-
-func AssetsPaths() []string {
-	var assetsPaths []string
-
-	for path, _ := range assets.cache {
-		assetsPaths = append(assetsPaths, path)
-	}
-
-	return assetsPaths
-}
-
-func getAsset(name string) ([]byte, error) {
-	name = filepath.ToSlash(name)
-	for _, asset := range assets {
-		if strings.EqualFold(name, asset.path) {
-			data, err := decodeAsset(asset.data)
-			if err != nil {
-				return nil, err
-			}
-
-			return data, nil
-		}
-	}
-
-	return nil, os.ErrNotExist
-}
-
-func readAsset(name string) (myasset, error) {
-	name = filepath.ToSlash(name)
-	for _, asset := range assets {
-		if strings.EqualFold(name, asset.path) {
-			return asset, nil
-		}
-	}
-
-	return myasset{}, os.ErrNotExist
-}
-
-func decodeAsset(assetData string) ([]byte, error) {
-	b64 := base64.NewDecoder(base64.StdEncoding, bytes.NewBufferString(assetData))
-	gr, err := gzip.NewReader(b64)
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := ioutil.ReadAll(gr)
-	if err != nil {
-		return nil, err
-	}
-	return data, nil
-}
 
 type AssetFileInfo struct {
 	name      string
@@ -144,13 +86,17 @@ func (this *AssetFile) Stat() (os.FileInfo, error) {
 }
 
 type AssetFS struct {
-	path  string
-	files map[string]*AssetFile
+	path        string
+	allowedExts []string
+	blockedExts []string
+	files       map[string]*AssetFile
 }
 
-func NewAssetFS(path string) *AssetFS {
+func NewAssetFS(path string, allowedExts, blockedExts []string) *AssetFS {
 	assetFS := &AssetFS{
-		path: path,
+		path:        path,
+		allowedExts: allowedExts,
+		blockedExts: blockedExts,
 	}
 	assetFS.files = make(map[string]*AssetFile, 0)
 
@@ -158,30 +104,40 @@ func NewAssetFS(path string) *AssetFS {
 }
 
 func (this *AssetFS) Open(name string) (http.File, error) {
-	if f, ok := this.files[name]; ok {
+	key := cleanJoinPath(this.path, name)
+	ext := filepath.Ext(key)
+	if gostring.Helper.InSlice(ext, this.blockedExts) {
+		return nil, os.ErrNotExist
+	}
+
+	if len(this.allowedExts) > 0 && !gostring.Helper.InSlice(ext, this.allowedExts) {
+		return nil, os.ErrNotExist
+	}
+
+	if f, ok := this.files[key]; ok {
 		return f, nil
 	}
 
-	key := strings.TrimPrefix(name, this.path)
-	if len(key) > 0 && key[0] == '/' {
-		key = key[1:]
-	}
-	asset, err := readAsset(key)
+	asset, err := Assets.ReadAsset(key)
 	if err != nil {
 		return nil, err
 	}
 
-	data, err := decodeAsset(asset.data)
-	if err != nil {
-		return nil, err
-	}
-
-	assetFile := NewAssetFile(key, data, asset.modTime)
+	data := []byte(asset.Data)
+	assetFile := NewAssetFile(key, data, asset.ModTime)
 	this.files[name] = assetFile
 
 	return assetFile, nil
 }
 
 func AssetsDir(path string) *AssetFS {
-	return NewAssetFS(path)
+	return NewAssetFS(path, []string{}, []string{})
+}
+
+func AssetsDirAllowedExts(path string, allowedExts []string) *AssetFS {
+	return NewAssetFS(path, allowedExts, []string{})
+}
+
+func AssetsDirBlockedExts(path string, blockedExts []string) *AssetFS {
+	return NewAssetFS(path, []string{}, blockedExts)
 }

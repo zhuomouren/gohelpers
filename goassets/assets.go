@@ -1,5 +1,3 @@
-// 变量程序生成，增加 Get 方法获取数据
-// 生成的文件添加解码函数
 // 打包资源文件
 package goassets
 
@@ -14,42 +12,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/zhuomouren/gohelpers/gofile"
 	"github.com/zhuomouren/gohelpers/gostring"
 )
 
-type goassets struct {
-	mux   sync.RWMutex
-	cache map[string]*GoAssets
-}
-
-func (this *goassets) add(path string, goAssets *GoAssets) (added bool) {
-	this.mux.Lock()
-	defer this.mux.Unlock()
-	if _, ok := this.cache[path]; !ok {
-		this.cache[path] = goAssets
-		added = true
-	}
-	return
-}
-
-func (this *goassets) get(path string) (goAssets *GoAssets, ok bool) {
-	this.mux.RLock()
-	defer this.mux.RUnlock()
-	goAssets, ok = this.cache[path]
-	return
-}
-
 var (
-	assets = &goassets{cache: make(map[string]*GoAssets)}
+	Assets = NewGoAssets()
 )
 
 type GoAssets struct {
-	packageName    string // 包名
-	assetsPath     string // 资源路径
+	packageName    string   // 包名
+	assetPaths     []string // 资源路径
 	assetsSavePath string
 	root           string
 	exts           []string
@@ -60,47 +35,112 @@ type Asset struct {
 	Path    string
 	Mode    os.FileMode
 	ModTime time.Time
-	Data    template.HTML
+	Data    string
 	// Info    os.FileInfo
 }
 
 //
-func NewGoAssets(assetsPath string) *GoAssets {
-	if goAssets, ok := assets.get(assetsPath); ok {
-		return goAssets
-	}
-
+func NewGoAssets() *GoAssets {
 	goAssets := &GoAssets{
-		assetsPath: assetsPath,
-		assets:     []Asset{},
-	}
-
-	if ok := assets.add(assetsPath, goAssets); !ok {
-		return nil
+		assets: []Asset{},
 	}
 
 	return goAssets
+}
+
+func (this *GoAssets) Exists() bool {
+	return len(this.assets) > 0
+}
+
+func (this *GoAssets) GetAsset(name string) ([]byte, error) {
+	name = filepath.ToSlash(name)
+	for _, asset := range this.assets {
+		if strings.EqualFold(name, asset.Path) {
+			data, err := this.DecodeAsset(asset.Data)
+			if err != nil {
+				return nil, err
+			}
+
+			return data, nil
+		}
+	}
+
+	return nil, os.ErrNotExist
+}
+
+func (this *GoAssets) ReadAsset(name string) (Asset, error) {
+	name = filepath.ToSlash(name)
+	for _, asset := range this.assets {
+		if strings.EqualFold(name, asset.Path) {
+			data, err := this.DecodeAsset(asset.Data)
+			if err != nil {
+				return Asset{}, err
+			}
+			asset.Data = string(data)
+			return asset, nil
+		}
+	}
+
+	return Asset{}, os.ErrNotExist
+}
+
+func (this *GoAssets) DecodeAsset(assetData string) ([]byte, error) {
+	b64 := base64.NewDecoder(base64.StdEncoding, bytes.NewBufferString(assetData))
+	gr, err := gzip.NewReader(b64)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := ioutil.ReadAll(gr)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func (this *GoAssets) AddAsset(path string, modTime time.Time, data string) {
 	asset := Asset{
 		Path:    path,
 		ModTime: modTime,
-		Data:    template.HTML(data),
+		Data:    data,
 	}
 
 	this.assets = append(this.assets, asset)
+}
+
+func (this *GoAssets) SetAssets(assets []Asset) {
+	this.assets = assets
+}
+
+func (this *GoAssets) GetAssets() []Asset {
+	return this.assets
+}
+
+func (this *GoAssets) GetAssetPaths() []string {
+	return this.assetPaths
+}
+
+func (this *GoAssets) SetAssetPaths(assetPaths []string) {
+	this.assetPaths = assetPaths
+}
+
+func (this *GoAssets) AddAssetPath(assetPath string) {
+	this.assetPaths = append(this.assetPaths, assetPath)
+}
+
+func (this *GoAssets) RemoveAssetPath(assetPath string) {
+	this.assetPaths = gostring.Helper.RemoveSlice(this.assetPaths, assetPath)
 }
 
 func (this *GoAssets) SetExts(exts []string) {
 	this.exts = exts
 }
 
-func (this *GoAssets) AddExts(ext string) {
+func (this *GoAssets) AddExt(ext string) {
 	this.exts = append(this.exts, ext)
 }
 
-func (this *GoAssets) RemoveExts(ext string) {
+func (this *GoAssets) RemoveExt(ext string) {
 	this.exts = gostring.Helper.RemoveSlice(this.exts, ext)
 }
 
@@ -115,7 +155,11 @@ func (this *GoAssets) Build(root, packageName, savePath string) error {
 
 	var err error
 
-	t := template.New("asset.tpl")
+	t := template.New("asset.tpl").Funcs(template.FuncMap{
+		"output": func(data string) template.HTML {
+			return template.HTML(data)
+		},
+	})
 	t, err = t.Parse(assetTmpl)
 	if err != nil {
 		return err
@@ -148,15 +192,17 @@ func (this *GoAssets) parse() error {
 	var err error
 
 	var files []string
-	path := cleanJoinPath(this.root, this.assetsPath)
-	if len(this.exts) > 0 {
-		_, files, err = gofile.FileHelper.AllowedFiles(path, this.exts)
-	} else {
-		_, files, err = gofile.FileHelper.Files(path)
-	}
+	for _, assetPath := range this.assetPaths {
+		path := cleanJoinPath(this.root, assetPath)
+		if len(this.exts) > 0 {
+			_, files, err = gofile.FileHelper.AllowedFiles(path, this.exts)
+		} else {
+			_, files, err = gofile.FileHelper.Files(path)
+		}
 
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
 	}
 
 	for _, file := range files {
@@ -224,7 +270,7 @@ func (this *GoAssets) readFile(assetFile string) (Asset, error) {
 		res += string(chunk[0:n]) + "\n"
 	}
 
-	asset.Data = template.HTML(res)
+	asset.Data = res
 
 	return asset, nil
 }
