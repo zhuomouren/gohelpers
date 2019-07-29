@@ -8,7 +8,7 @@ import (
 
 type GoNet struct{}
 
-var Helper = &GoNet{}
+var NetHelper = &GoNet{}
 
 // Ping connects to the address on the named network,
 // using net.DialTimeout, and immediately closes it.

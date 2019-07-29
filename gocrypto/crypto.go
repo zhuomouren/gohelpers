@@ -3,7 +3,6 @@ package gocrypto
 import (
 	"crypto/hmac"
 	"crypto/md5"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"hash"
@@ -12,17 +11,6 @@ import (
 type GoCrypto struct{}
 
 var Helper = &GoCrypto{}
-
-// 随机字符串
-func (*GoCrypto) RandomString(n int) string {
-	const alphanum = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	var bytes = make([]byte, n)
-	rand.Read(bytes)
-	for i, b := range bytes {
-		bytes[i] = alphanum[b%byte(len(alphanum))]
-	}
-	return string(bytes)
-}
 
 // http://code.google.com/p/go/source/browse/pbkdf2/pbkdf2.go?repo=crypto
 func (*GoCrypto) PBKDF2(password, salt []byte, iter, keyLen int, h func() hash.Hash) []byte {

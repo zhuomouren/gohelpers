@@ -39,6 +39,10 @@ type Asset struct {
 	// Info    os.FileInfo
 }
 
+func (this *Asset) GetRawData() ([]byte, error) {
+	return decodeAsset(this.Data)
+}
+
 //
 func NewGoAssets() *GoAssets {
 	goAssets := &GoAssets{
@@ -85,17 +89,7 @@ func (this *GoAssets) ReadAsset(name string) (Asset, error) {
 }
 
 func (this *GoAssets) DecodeAsset(assetData string) ([]byte, error) {
-	b64 := base64.NewDecoder(base64.StdEncoding, bytes.NewBufferString(assetData))
-	gr, err := gzip.NewReader(b64)
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := ioutil.ReadAll(gr)
-	if err != nil {
-		return nil, err
-	}
-	return data, nil
+	return decodeAsset(assetData)
 }
 
 func (this *GoAssets) AddAsset(path string, modTime time.Time, data string) {
@@ -189,20 +183,22 @@ func (this *GoAssets) Build(root, packageName, savePath string) error {
 }
 
 func (this *GoAssets) parse() error {
-	var err error
-
 	var files []string
 	for _, assetPath := range this.assetPaths {
+		var err error
+		var allowedFiles []string
 		path := cleanJoinPath(this.root, assetPath)
 		if len(this.exts) > 0 {
-			_, files, err = gofile.FileHelper.AllowedFiles(path, this.exts)
+			_, allowedFiles, err = gofile.Helper.AllowedFiles(path, this.exts)
 		} else {
-			_, files, err = gofile.FileHelper.Files(path)
+			_, allowedFiles, err = gofile.Helper.Files(path)
 		}
 
 		if err != nil {
 			return err
 		}
+
+		files = append(files, allowedFiles...)
 	}
 
 	for _, file := range files {
@@ -280,4 +276,17 @@ func cleanJoinPath(paths ...string) string {
 }
 func cleanPath(path string) string {
 	return filepath.ToSlash(filepath.Clean(path))
+}
+func decodeAsset(assetData string) ([]byte, error) {
+	b64 := base64.NewDecoder(base64.StdEncoding, bytes.NewBufferString(assetData))
+	gr, err := gzip.NewReader(b64)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := ioutil.ReadAll(gr)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
