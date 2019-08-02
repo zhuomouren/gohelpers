@@ -30,8 +30,12 @@ func (this *GoURL) RemoveHTTPPrefix(url string) string {
 	return match
 }
 
-// 美化 url
+// 美化 url. 如果没有 scheme，将以斜杠开头
 func (this *GoURL) Clean(uri string) string {
+	if !this.HasPrefix(uri) {
+		return "/" + strings.TrimLeft(path.Clean(uri), "/")
+	}
+
 	u, err := url.Parse(uri)
 	if err != nil {
 		return uri
