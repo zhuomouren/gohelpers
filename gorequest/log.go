@@ -12,7 +12,7 @@ const (
 	FATAL = LogLevel(5)
 )
 
-type AppLogFunc func(lvl LogLevel, f string, args ...interface{})
+type LogFunc func(lvl LogLevel, f string, args ...interface{})
 
 func (l LogLevel) String() string {
 	switch l {

@@ -34,7 +34,7 @@ type GoRequest struct {
 	DownloadContinued        bool // 断点续传
 	DownloadProgressInterval time.Duration
 	downloadCallbacks        []DownloadCallback
-	Logf                     AppLogFunc
+	logf                     LogFunc
 	Ctx                      context.Context
 	Retries                  int // 失败重试次数。如果是 -1，则一直重试，直到成功。默认是0，执行一次
 	UserAgent                string
@@ -43,8 +43,6 @@ type GoRequest struct {
 	dump                     []byte
 	abort                    bool
 	baseURL                  *url.URL
-	// Depth is the number of the parents of the request
-	Depth int
 	// Method is the HTTP method of the request
 	Method string
 	// MaxBodySize is the limit of the retrieved response body in bytes.
@@ -126,7 +124,7 @@ func ProxyURL(rawurl string) func(*GoRequest) {
 
 		u, err := url.Parse(rawurl)
 		if err != nil {
-			this.Logf(ERROR, "parse proxy url [%s] error: %s", rawurl, err.Error())
+			this.logf(ERROR, "parse proxy url [%s] error: %s", rawurl, err.Error())
 			return
 		}
 		trans.Proxy = http.ProxyURL(u)
@@ -140,19 +138,24 @@ func Context(ctx context.Context) func(*GoRequest) {
 }
 
 // 日志
-func Logf(logf AppLogFunc) func(*GoRequest) {
+func Logf(logf LogFunc) func(*GoRequest) {
 	return func(this *GoRequest) {
 		reqLogf := func(lvl LogLevel, f string, args ...interface{}) {
 			logf(LogLevel(lvl), f, args...)
 		}
 
-		this.Logf = reqLogf
+		this.Logf(reqLogf)
 	}
 }
 
 // Abort cancels the HTTP request when called in an OnRequest callback
 func (this *GoRequest) Abort() {
 	this.abort = true
+}
+
+// 日志
+func (this *GoRequest) Logf(logf LogFunc) {
+	this.logf = logf
 }
 
 // AbsoluteURL returns with the resolved absolute URL of an URL chunk.
@@ -187,7 +190,7 @@ func (this *GoRequest) init() {
 	this.DownloadProgressInterval = 200 * time.Millisecond
 
 	// log
-	this.Logf = func(lvl LogLevel, f string, args ...interface{}) {
+	this.logf = func(lvl LogLevel, f string, args ...interface{}) {
 		// if lvl < ERROR {
 		// 	return
 		// }
@@ -245,22 +248,16 @@ func (this *GoRequest) Fetch(method, rawurl string, requestData io.Reader, hdr h
 	}
 
 	goResp := &GoResponse{
-		request:                  req,
-		downloadProgressInterval: this.DownloadProgressInterval,
-		// downloadProgress:         this.downloadProgress,
+		request: this,
 	}
 
 	if this.Debug {
 		dump, err := httputil.DumpRequest(req, this.DumpBody)
 		if err != nil {
-			this.Logf(ERROR, err.Error())
+			this.logf(ERROR, err.Error())
 		}
 
 		this.dump = dump
-	}
-
-	if goResp.client == nil {
-		goResp.client = this.getClient()
 	}
 
 	// 下载文件，支持断点续传
@@ -282,9 +279,9 @@ func (this *GoRequest) Fetch(method, rawurl string, requestData io.Reader, hdr h
 	// retries equal to -1, it will run forever until success
 	// retries is setted, it will retries fixed times.
 	for i := 0; this.Retries == -1 || i <= this.Retries; i++ {
-		res, err = goResp.client.Do(req)
+		res, err = this.getClient().Do(req)
 		if err == nil {
-			this.Logf(WARN, "retries %d: %s", i, err.Error())
+			this.logf(WARN, "retries %d: %s", i, err.Error())
 			break
 		}
 	}
@@ -296,51 +293,9 @@ func (this *GoRequest) Fetch(method, rawurl string, requestData io.Reader, hdr h
 	defer res.Body.Close()
 
 	var bodyReader io.Reader = res.Body
-
-	if file != nil || len(this.downloadCallbacks) > 0 {
-		readBytes := make([]byte, 1024)
-		total := res.ContentLength
-		var current int64
-		var lastTime time.Time
-
-		for {
-			n, err := bodyReader.Read(readBytes)
-			if n > 0 {
-				if file != nil {
-					if _, err := file.Write(readBytes[:n]); err != nil {
-						return nil, err
-					}
-				}
-				current += int64(n)
-				if now := time.Now(); now.Sub(lastTime) > this.DownloadProgressInterval {
-					lastTime = now
-					this.handleOnDownload(current, total)
-				}
-				if current >= total {
-					break
-				}
-				if this.MaxBodySize > 0 && current >= int64(this.MaxBodySize) {
-					break
-				}
-			}
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				return nil, err
-			}
-		}
-
-		if file != nil {
-			return nil, nil
-		}
-	} else {
-
+	if this.MaxBodySize > 0 {
+		bodyReader = io.LimitReader(bodyReader, int64(this.MaxBodySize))
 	}
-
-	// if this.MaxBodySize > 0 {
-	// 	bodyReader = io.LimitReader(bodyReader, int64(this.MaxBodySize))
-	// }
 	contentEncoding := strings.ToLower(res.Header.Get("Content-Encoding"))
 	if !res.Uncompressed && (strings.Contains(contentEncoding, "gzip") || (contentEncoding == "" && strings.Contains(strings.ToLower((res.Header.Get("Content-Type"))), "gzip"))) {
 		bodyReader, err = gzip.NewReader(bodyReader)
@@ -349,17 +304,65 @@ func (this *GoRequest) Fetch(method, rawurl string, requestData io.Reader, hdr h
 		}
 		defer bodyReader.(*gzip.Reader).Close()
 	}
+
+	if file != nil || len(this.downloadCallbacks) > 0 {
+		if err := this.download(bodyReader, res.ContentLength, file); err != nil {
+			return nil, err
+		}
+
+		return nil, nil
+	}
+
 	body, err := ioutil.ReadAll(bodyReader)
 	if err != nil {
 		return nil, err
 	}
 
-	goResp.responseBody = body
+	goResp.data = body
 
 	return goResp, nil
 }
 
-// OnRequest registers a function. Function will be executed on every
+func (this *GoRequest) download(bodyReader io.Reader, total int64, file *os.File) error {
+	readBytes := make([]byte, 1024)
+	var current int64
+	var lastTime time.Time
+
+	defer func() {
+		this.handleOnDownload(current, total)
+	}()
+
+	for {
+		n, err := bodyReader.Read(readBytes)
+		if n > 0 {
+			if file != nil {
+				if _, err := file.Write(readBytes[:n]); err != nil {
+					return err
+				}
+			}
+			current += int64(n)
+			nowTime := time.Now()
+			if nowTime.Sub(lastTime) > this.DownloadProgressInterval {
+				lastTime = nowTime
+				this.handleOnDownload(current, total)
+			}
+			if current >= total {
+				break
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
+// OnRequest registers a function.
+// Function will be executed on every
 // request made by the Collector
 func (this *GoRequest) OnRequest(f RequestCallback) {
 	this.lock.Lock()
@@ -416,7 +419,7 @@ func (this *GoRequest) getClient() *http.Client {
 func (this *GoRequest) getTransport() *http.Transport {
 	trans, ok := this.getClient().Transport.(*http.Transport)
 	if !ok {
-		this.Logf(WARN, "unable to get client.Transport")
+		this.logf(WARN, "unable to get client.Transport")
 		return nil
 	}
 	return trans
