@@ -1,4 +1,4 @@
-package gorequest
+package gonet
 
 // logging stuff copied from github.com/nsqio/nsq/internal/lg
 
