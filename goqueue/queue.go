@@ -28,226 +28,211 @@ const (
 	FATAL = diskqueue.FATAL
 )
 
-type AppLogFunc func(lvl LogLevel, f string, args ...interface{})
+type LogFunc func(lvl LogLevel, f string, args ...interface{})
 
 const (
-	MIN_MSG_SIZE int32 = 1
-	MAX_MSG_SIZE int32 = 1024
+	MIN_MSG_SIZE int32 = 1   // 消息的最小长度
+	MAX_MSG_SIZE int32 = 255 // 消息的最大长度
 )
 
-// GoQueue 是对 DiskQueue 的封装，可以在内存和文件系统上切换
-type GoQueue struct {
+// goQueue 是对 DiskQueue 的封装，可以在内存和文件系统上切换
+type goQueue struct {
 	sync.RWMutex
-	Name            string
-	MemoryQueueSize int64 // 内存里的消息数
-	memoryCount     int64
+	name            string
+	memoryMaxSize   uint64 // 内存里允许的最大消息数量
+	memoryCount     uint64 // // 当前内存里的消息数量
 	memoryMsgChan   chan []byte
 	exitFlag        bool // 退出标识
 	exitMutex       sync.RWMutex
-	DiskQueue       bool
-	DataPath        string
-	MaxBytesPerFile int64         // 每个磁盘队列文件的字节数
-	SyncEvery       int64         // number of writes per fsync
-	SyncTimeout     time.Duration // duration of time per fsync
+	useDisk         bool
+	dataPath        string
+	maxBytesPerFile int64         // 每个磁盘队列文件的字节数
+	syncEvery       int64         // number of writes per fsync
+	syncTimeout     time.Duration // duration of time per fsync
 	backend         diskqueue.Interface
 	logf            diskqueue.AppLogFunc
 }
 
-// NewGoQueue 创建一个新的GoQueue实例，并返回指针
-func NewGoQueue(name string, options ...func(*GoQueue)) *GoQueue {
-	gq := &GoQueue{
-		Name: name,
-	}
-	gq.Init()
-
-	for _, f := range options {
-		f(gq)
+// 创建一个新的内存队列实例，并返回指针
+func NewMemory(name string, options ...uint64) *goQueue {
+	this := &goQueue{
+		name:          name,
+		useDisk:       false,
+		memoryMaxSize: 100000, // 默认 10w
+		logf:          logf,
 	}
 
-	if gq.MemoryQueueSize == 0 {
-		gq.DiskQueue = true
+	if len(options) > 0 {
+		this.memoryMaxSize = options[0]
 	}
 
-	// 使用内存存储
-	if !gq.DiskQueue {
-		gq.memoryMsgChan = make(chan []byte, gq.MemoryQueueSize)
-		return gq
-	} else {
-		gq.MemoryQueueSize = 0
+	this.memoryMsgChan = make(chan []byte, this.memoryMaxSize)
+	return this
+}
+
+// 创建一个新的goQueue实例，并返回指针
+func New(name string, options ...string) *goQueue {
+	this := &goQueue{
+		name:            name,
+		useDisk:         true,
+		dataPath:        "diskqueue",
+		memoryMaxSize:   0,
+		maxBytesPerFile: 1024 * 1024 * 10, // 默认 10M
+		syncEvery:       1024,             // 2500
+		syncTimeout:     2 * time.Second,
+		logf:            logf,
 	}
 
-	// 使用 diskqueue 时默认文件路径是 goqueue
-	if gq.DataPath == "" {
-		gq.DataPath = "goqueue"
+	if len(options) > 0 {
+		this.dataPath = options[0]
 	}
 
-	gq.backend = diskqueue.New(
-		gq.Name,
-		gq.DataPath,
-		gq.MaxBytesPerFile,
+	this.backend = diskqueue.New(
+		this.dataPath,
+		this.dataPath,
+		this.maxBytesPerFile,
 		MIN_MSG_SIZE,
 		MAX_MSG_SIZE,
-		gq.SyncEvery,
-		gq.SyncTimeout,
-		gq.logf,
+		this.syncEvery,
+		this.syncTimeout,
+		this.logf,
 	)
 
 	// 创建存储路径
-	if err := gq.diskQueuePath(); err != nil {
-		gq.logf(ERROR, "GOQUEUE(%s): failed to create directory[%s] - %s", gq.Name, gq.DataPath, err)
+	if err := this.diskQueuePath(); err != nil {
+		this.logf(ERROR, "GOQUEUE(%s): failed to create directory[%s] - %s",
+			this.name, this.dataPath, err.Error())
 	}
 
-	return gq
+	return this
 }
 
 // 队列存放路径
-func DataPath(dataPath string) func(*GoQueue) {
-	return func(gq *GoQueue) {
-		gq.DataPath = dataPath
-	}
+func (this *goQueue) DataPath(dataPath string) *goQueue {
+	this.dataPath = dataPath
+	return this
 }
 
 // 每个磁盘队列文件的字节数
-func MaxBytesPerFile(maxBytesPerFile int64) func(*GoQueue) {
-	return func(gq *GoQueue) {
-		gq.MaxBytesPerFile = maxBytesPerFile
-	}
+func (this *goQueue) MaxBytesPerFile(maxBytesPerFile int64) *goQueue {
+	this.maxBytesPerFile = maxBytesPerFile
+	return this
 }
 
 // 内存里的消息数
-func MemoryQueueSize(memoryQueueSize int64) func(*GoQueue) {
-	return func(gq *GoQueue) {
-		gq.MemoryQueueSize = memoryQueueSize
-	}
+func (this *goQueue) MemoryMaxSize(memoryMaxSize uint64) *goQueue {
+	this.memoryMaxSize = memoryMaxSize
+	return this
 }
 
-// 使用文件系统
-func DiskQueue() func(*GoQueue) {
-	return func(gq *GoQueue) {
-		gq.DiskQueue = true
-	}
+func (this *goQueue) SyncEvery(syncEvery int64) *goQueue {
+	this.syncEvery = syncEvery
+	return this
 }
 
-func SyncEvery(syncEvery int64) func(*GoQueue) {
-	return func(gq *GoQueue) {
-		gq.SyncEvery = syncEvery
-	}
+func (this *goQueue) SyncTimeout(syncTimeout time.Duration) *goQueue {
+	this.syncTimeout = syncTimeout
+	return this
 }
 
-func SyncTimeout(syncTimeout time.Duration) func(*GoQueue) {
-	return func(gq *GoQueue) {
-		gq.SyncTimeout = syncTimeout
+func (this *goQueue) Logf(logf LogFunc) *goQueue {
+	dqLogf := func(lvl diskqueue.LogLevel, f string, args ...interface{}) {
+		logf(LogLevel(lvl), f, args...)
 	}
-}
 
-func Logf(logf AppLogFunc) func(*GoQueue) {
-	return func(gq *GoQueue) {
-		dqLogf := func(lvl diskqueue.LogLevel, f string, args ...interface{}) {
-			logf(LogLevel(lvl), f, args...)
-		}
-
-		gq.logf = dqLogf
-	}
-}
-
-func (gq *GoQueue) Init() {
-	gq.MemoryQueueSize = 10
-	gq.MaxBytesPerFile = 1024 * 1024
-	gq.DiskQueue = false
-	gq.SyncEvery = 1 // 2500
-	gq.SyncTimeout = 2 * time.Second
-	gq.logf = logf
+	this.logf = dqLogf
+	return this
 }
 
 // 返回一个bool，指示此队列是否关闭/退出
-func (gq *GoQueue) Exiting() bool {
-	return gq.exitFlag
+func (this *goQueue) Exiting() bool {
+	return this.exitFlag
 }
 
 // 删除一个队列，如果使用 DiskQueue 持久化，则一并删除
-func (gq *GoQueue) Delete() error {
-	return gq.exit(true)
+func (this *goQueue) Delete() error {
+	return this.exit(true)
 }
 
 // 关闭一个队列，不会删除 DiskQueue 持久化的数据
-func (gq *GoQueue) Close() error {
-	return gq.exit(false)
+func (this *goQueue) Close() error {
+	return this.exit(false)
 }
 
 // 退出当前队列，并指示是否删除持久化的数据
-func (gq *GoQueue) exit(deleted bool) error {
-	gq.exitMutex.Lock()
-	defer gq.exitMutex.Unlock()
+func (this *goQueue) exit(deleted bool) error {
+	this.exitMutex.Lock()
+	defer this.exitMutex.Unlock()
 
-	gq.exitFlag = true
+	this.exitFlag = true
 
 	if deleted {
-		gq.logf(INFO, "GOQUEUE(%s): deleting", gq.Name)
+		this.logf(INFO, "GOQUEUE(%s): deleting", this.name)
 	} else {
-		gq.logf(INFO, "GOQUEUE(%s): closing", gq.Name)
+		this.logf(INFO, "GOQUEUE(%s): closing", this.name)
 	}
 
-	gq.Empty()
+	this.Empty()
 
-	if !gq.DiskQueue {
+	if !this.useDisk {
 		return nil
 	}
 
 	// 删除持久化数据
 	if deleted {
-		return gq.backend.Delete()
+		return this.backend.Delete()
 	}
 
-	return gq.backend.Close()
+	return this.backend.Close()
 }
 
 // 清空队列
-func (gq *GoQueue) Empty() error {
-	gq.Lock()
-	defer gq.Unlock()
+func (this *goQueue) Empty() error {
+	this.Lock()
+	defer this.Unlock()
 
-	gq.memoryCount = 0
+	this.memoryCount = 0
 
 	for {
 		select {
-		case <-gq.memoryMsgChan:
+		case <-this.memoryMsgChan:
 		default:
 			goto finish
 		}
 	}
 
 finish:
-	if !gq.DiskQueue {
+	if !this.useDisk {
 		return nil
 	}
-	return gq.backend.Empty()
+	return this.backend.Empty()
 }
 
-func (gq *GoQueue) Depth() int64 {
-	if gq.DiskQueue {
-		return gq.backend.Depth()
+func (this *goQueue) Depth() int64 {
+	if this.useDisk {
+		return this.backend.Depth()
 	} else {
-		return int64(len(gq.memoryMsgChan))
+		return int64(len(this.memoryMsgChan))
 	}
 }
 
 // Depth() 的别名
-func (gq *GoQueue) Size() int64 {
-	return gq.Depth()
+func (this *goQueue) Size() int64 {
+	return this.Depth()
 }
 
 // 从队列中读取数据
-func (gq *GoQueue) Get() ([]byte, bool) {
+func (this *goQueue) Get() ([]byte, bool) {
 	var data []byte
 	var ok bool
 
 	for {
 		select {
-		case data, ok = <-gq.ReadChan():
-			gq.logf(DEBUG, "GOQUEUE(%s): read a message - %s", gq.Name, string(data))
+		case data, ok = <-this.ReadChan():
+			this.logf(DEBUG, "GOQUEUE(%s): read a message - %s", this.name, string(data))
 			goto exit
 		default:
-			if gq.Depth() > 0 {
+			if this.Depth() > 0 {
 				continue
 			} else {
 				ok = false
@@ -260,48 +245,48 @@ exit:
 	return data, ok
 }
 
-func (gq *GoQueue) ReadChan() chan []byte {
-	if gq.DiskQueue {
-		return gq.backend.ReadChan()
+func (this *goQueue) ReadChan() chan []byte {
+	if this.useDisk {
+		return this.backend.ReadChan()
 	} else {
-		return gq.memoryMsgChan
+		return this.memoryMsgChan
 	}
 }
 
 // 将数据写入队列
-func (gq *GoQueue) Put(data []byte) error {
-	gq.RLock()
-	defer gq.RUnlock()
-	if gq.Exiting() {
+func (this *goQueue) Put(data []byte) error {
+	this.RLock()
+	defer this.RUnlock()
+	if this.Exiting() {
 		return errors.New("exiting")
 	}
 
-	if gq.DiskQueue {
-		err := gq.backend.Put(data)
+	if this.useDisk {
+		err := this.backend.Put(data)
 		if err != nil {
-			gq.logf(ERROR, "GOQUEUE(%s): failed to write message to backend - %s", gq.Name, err)
+			this.logf(ERROR, "GOQUEUE(%s): failed to write message to backend - %s", this.name, err)
 			return err
 		}
 	} else {
 		// 如果写入队列的数量超过定义的数量，则丢弃数据，不再继续写入
-		if gq.memoryCount >= gq.MemoryQueueSize {
+		if this.memoryCount >= this.memoryMaxSize {
 			return nil
 		}
 
-		gq.memoryMsgChan <- data
-		gq.memoryCount++
+		this.memoryMsgChan <- data
+		this.memoryCount++
 	}
 
 	return nil
 }
 
 // 创建 DiskQueue 数据的保存路径
-func (gq *GoQueue) diskQueuePath() error {
-	if !gq.DiskQueue {
+func (this *goQueue) diskQueuePath() error {
+	if !this.useDisk {
 		return nil
 	}
 
-	path := gq.DataPath
+	path := this.dataPath
 	if !filepath.IsAbs(path) {
 		dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
 		if err != nil {

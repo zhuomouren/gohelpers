@@ -19,7 +19,6 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -84,16 +83,26 @@ func (this *Request) Bytes() ([]byte, error) {
 		return nil, this.err
 	}
 
+	if this.data != nil {
+		return this.data, nil
+	}
+
+	defer this.response.Body.Close()
+
+	data, err := ioutil.ReadAll(this.response.Body)
+	if err != nil {
+		this.err = err
+		return nil, err
+	}
+	this.data = data
+
 	return this.data, nil
 }
 
 func (this *Request) String() (string, error) {
-	if this.err != nil {
-		return "", this.err
-	}
-
-	if len(this.data) == 0 {
-		return "", nil
+	_, err := this.Bytes()
+	if err != nil {
+		return "", err
 	}
 
 	data := string(this.data)
@@ -101,16 +110,18 @@ func (this *Request) String() (string, error) {
 }
 
 func (this *Request) ToJSON(v interface{}) error {
-	if this.err != nil {
-		return this.err
+	_, err := this.Bytes()
+	if err != nil {
+		return err
 	}
 
 	return json.Unmarshal(this.data, v)
 }
 
 func (this *Request) ToXML(v interface{}) error {
-	if this.err != nil {
-		return this.err
+	_, err := this.Bytes()
+	if err != nil {
+		return err
 	}
 
 	return xml.Unmarshal(this.data, v)
@@ -121,6 +132,28 @@ func (this *Request) Save(fileName string) error {
 		return this.err
 	}
 
+	f, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if this.data != nil {
+		_, err = f.Write(this.data)
+		return err
+	}
+
+	if len(this.downloadCallbacks) > 0 {
+		if err := this.download(f); err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	defer this.response.Body.Close()
+	_, err = io.Copy(f, this.response.Body)
+
 	return ioutil.WriteFile(fileName, this.data, 0644)
 }
 
@@ -129,13 +162,13 @@ func (this *Request) Response() *http.Response {
 }
 
 func (this *Request) GET(URL string) *Request {
-	this.err = this.Fetch("GET", URL, nil, nil, nil, nil)
+	this.err = this.Fetch("GET", URL, nil, nil, nil)
 	return this
 }
 
 // req.POST("http://example.com/login", map[string]string{"username": "admin", "password": "admin"})
 func (this *Request) POST(URL string, requestData map[string]string) *Request {
-	this.err = this.Fetch("POST", URL, createFormReader(requestData), nil, nil, nil)
+	this.err = this.Fetch("POST", URL, createFormReader(requestData), nil, nil)
 	return this
 }
 
@@ -156,7 +189,7 @@ func (this *Request) POST(URL string, requestData map[string]string) *Request {
 func (this *Request) POSTMultipart(URL string, requestData map[string][]byte) *Request {
 	boundary := randomBoundary()
 	this.headers.Set("Content-Type", "multipart/form-data; boundary="+boundary)
-	this.err = this.Fetch("POST", URL, createMultipartReader(boundary, requestData), nil, nil, nil)
+	this.err = this.Fetch("POST", URL, createMultipartReader(boundary, requestData), nil, nil)
 	return this
 }
 
@@ -304,12 +337,13 @@ func (this *Request) init() {
 	}
 }
 
-func (this *Request) Fetch(method, rawurl string, requestData io.Reader, hdr http.Header, ctx context.Context, file *os.File) error {
+func (this *Request) Fetch(method, rawurl string, requestData io.Reader, hdr http.Header, ctx context.Context) error {
 	this.data, this.err, this.response, this.dump = nil, nil, nil, nil
 	this.cost = time.Duration(0)
 
 	parsedURL, err := url.Parse(rawurl)
 	if err != nil {
+		this.err = err
 		return err
 	}
 
@@ -358,22 +392,10 @@ func (this *Request) Fetch(method, rawurl string, requestData io.Reader, hdr htt
 		req.Header.Set("Accept", "*/*")
 	}
 
-	// 下载文件，支持断点续传
-	var stat os.FileInfo
-	if file != nil {
-		stat, err = file.Stat()
-		if err != nil {
-			return err
-		}
-
-		if _, ok := req.Header["Range"]; !ok && stat.Size() > 0 {
-			req.Header.Set("Range", "bytes="+strconv.FormatInt(stat.Size(), 10)+"-")
-		}
-	}
-
 	if this.debug {
 		dump, err := httputil.DumpRequest(req, true)
 		if err != nil {
+			this.err = err
 			this.logf(ERROR, err.Error())
 		}
 
@@ -397,14 +419,15 @@ func (this *Request) Fetch(method, rawurl string, requestData io.Reader, hdr htt
 	after := time.Now()
 	this.cost = after.Sub(before)
 	if err != nil {
+		this.err = err
 		return err
 	}
-	defer resp.Body.Close()
 
 	this.statusCode = resp.StatusCode
 	if this.debug {
 		dump, err := httputil.DumpResponse(resp, false)
 		if err != nil {
+			this.err = err
 			this.logf(ERROR, err.Error())
 		}
 
@@ -418,33 +441,25 @@ func (this *Request) Fetch(method, rawurl string, requestData io.Reader, hdr htt
 	}
 	contentEncoding := strings.ToLower(resp.Header.Get("Content-Encoding"))
 	if !resp.Uncompressed && (strings.Contains(contentEncoding, "gzip") || (contentEncoding == "" && strings.Contains(strings.ToLower((resp.Header.Get("Content-Type"))), "gzip"))) {
-		bodyReader, err = gzip.NewReader(bodyReader)
+		bodyReader, err := gzip.NewReader(bodyReader)
 		if err != nil {
+			this.err = err
 			return err
 		}
-		defer bodyReader.(*gzip.Reader).Close()
-	}
-
-	if file != nil || len(this.downloadCallbacks) > 0 {
-		if err := this.download(bodyReader, resp.ContentLength, file); err != nil {
-			return err
-		}
-
-		return nil
+		resp.Body = ioutil.NopCloser(bodyReader)
 	}
 
 	this.response = resp
 
-	this.data, err = ioutil.ReadAll(bodyReader)
-	if err != nil {
-		return err
-	}
-
 	return nil
 }
 
-func (this *Request) download(bodyReader io.Reader, total int64, file *os.File) error {
+func (this *Request) download(file *os.File) error {
 	readBytes := make([]byte, 1024)
+	bodyReader := this.response.Body
+	defer bodyReader.Close()
+
+	total := this.response.ContentLength
 	var current int64
 	var lastTime time.Time
 

@@ -4,152 +4,243 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/imroc/req"
+	"github.com/nsqio/go-diskqueue"
+
 	"github.com/zhuomouren/gohelpers"
-	"github.com/zhuomouren/gohelpers/goqueue"
+	"github.com/zhuomouren/gohelpers/gonet"
 )
 
-type ParseFunc func(url, html string)
+type VisitCallback func(url, html string)
 
 // 已经采集过的 URL，将不会放入队列
 type VisitedCallback func(url string) bool
 
 type GoSpider struct {
-	Name            string
-	URL             string
-	Charset         string
-	Proxy           string
-	Queue           *goqueue.GoQueue
-	urlsRule        []string
-	parseRule       map[string]ParseFunc
-	headerMap       map[string]string
-	visitedCallback VisitedCallback
-	visitedUrls     map[string]bool
-	waitCount       int
-	runCount        int64
-	logf            goqueue.AppLogFunc
-	request         *req.Req
+	name             string
+	url              string
+	charset          string
+	proxy            string
+	queue            diskqueue.Interface
+	queueDataPath    string
+	urlsRule         []string
+	visitCallbacks   map[string]VisitCallback
+	headerMap        map[string]string
+	visitedCallbacks []VisitedCallback
+	visitedUrls      map[string]bool
+	waitCount        int
+	runCount         int64
+	logf             diskqueue.AppLogFunc
+	http             *gonet.Request
+	lock             *sync.RWMutex
+	wg               *sync.WaitGroup
+	depth            int
+	exiting          bool
 }
 
-func NewGoSpider(name, url string, options ...func(*GoSpider)) *GoSpider {
-	ls := &GoSpider{
-		Name: name,
-		URL:  url,
+func New(name, url string) *GoSpider {
+	this := &GoSpider{
+		name: name,
+		url:  url,
 	}
-	ls.Init()
+	this.init()
 
-	for _, f := range options {
-		f(ls)
-	}
-
-	if ls.Queue.Size() == 0 {
-		ls.Queue.Put([]byte(ls.URL))
+	if this.queue.Depth() == 0 {
+		this.putQueue(this.getQueueData(1, this.url))
 	}
 
-	return ls
+	return this
 }
 
-func Name(name string) func(*GoSpider) {
-	return func(ls *GoSpider) {
-		ls.Name = name
+func (this *GoSpider) Charset(charset string) *GoSpider {
+	this.charset = charset
+	return this
+}
+
+func (this *GoSpider) DataPath(queueDataPath string) *GoSpider {
+	this.queueDataPath = queueDataPath
+	return this
+}
+
+func (this *GoSpider) Wait() {
+	this.wg.Wait()
+}
+
+func (this *GoSpider) Proxy(proxy string) *GoSpider {
+	this.proxy = proxy
+	return this
+}
+
+func (this *GoSpider) Depth(depth int) *GoSpider {
+	this.depth = depth
+	return this
+}
+
+func (this *GoSpider) AddHeader(name, val string) *GoSpider {
+	this.headerMap[name] = val
+	return this
+}
+
+func (this *GoSpider) AddURLRule(rule string) *GoSpider {
+	this.urlsRule = append(this.urlsRule, gohelpers.String.DeepProcessingRegex(rule))
+	return this
+}
+
+func (this *GoSpider) URLRules(rules []string) *GoSpider {
+	for _, rule := range rules {
+		this.urlsRule = append(this.urlsRule, gohelpers.String.DeepProcessingRegex(rule))
+	}
+
+	return this
+}
+
+func (this *GoSpider) OnVisit(rule string, f VisitCallback) {
+	this.lock.Lock()
+	if this.visitCallbacks == nil {
+		this.visitCallbacks = make(map[string]VisitCallback)
+	}
+	this.visitCallbacks[gohelpers.String.DeepProcessingRegex(rule)] = f
+	this.lock.Unlock()
+}
+
+func (this *GoSpider) handleOnVisit(url, html string) {
+	for rule, f := range this.visitCallbacks {
+		if this.exactMatch(rule, url) {
+			f(url, html)
+		}
 	}
 }
 
-func URL(url string) func(*GoSpider) {
-	return func(ls *GoSpider) {
-		ls.URL = url
-	}
+func (this *GoSpider) OnVisited(f VisitedCallback) {
+	this.lock.Lock()
+	this.visitedCallbacks = append(this.visitedCallbacks, f)
+	this.lock.Unlock()
 }
 
-func Charset(charset string) func(*GoSpider) {
-	return func(ls *GoSpider) {
-		ls.Charset = charset
+func (this *GoSpider) handleOnVisited(url string) bool {
+	for _, f := range this.visitedCallbacks {
+		if b := f(url); b {
+			return true
+		}
 	}
+
+	return false
 }
 
-func Proxy(proxy string) func(*GoSpider) {
-	return func(ls *GoSpider) {
-		ls.Proxy = proxy
-	}
+func (this *GoSpider) Run() {
+	go this.run()
 }
 
-func Queue(queue *goqueue.GoQueue) func(*GoSpider) {
-	return func(ls *GoSpider) {
-		ls.Queue = queue
-	}
+func (this *GoSpider) Stop() error {
+	this.wgReset()
+	return this.queue.Close()
+}
+
+func (this *GoSpider) Close() error {
+	this.wgReset()
+	return this.queue.Empty()
+}
+
+func (this *GoSpider) RunCount() int64 {
+	return this.runCount
+}
+
+func (this *GoSpider) Size() int64 {
+	return this.queue.Depth()
 }
 
 // 初始化
-func (ls *GoSpider) Init() {
-	if ls.Name == "" || ls.URL == "" {
+func (this *GoSpider) init() {
+	if this.name == "" || this.url == "" {
 		return
 	}
 
-	ls.Queue = goqueue.NewGoQueue(ls.URL)
-	ls.parseRule = make(map[string]ParseFunc)
-	ls.headerMap = map[string]string{}
-	ls.visitedUrls = make(map[string]bool)
-	ls.visitedCallback = func(url string) bool {
-		return false
+	this.queue = diskqueue.New(
+		this.name,
+		this.queueDataPath,
+		1024*1024*10,
+		10,
+		255,
+		1024,
+		2*time.Second,
+		this.logf,
+	)
+	this.visitCallbacks = make(map[string]VisitCallback)
+	this.headerMap = map[string]string{}
+	this.visitedUrls = make(map[string]bool)
+	this.visitedCallbacks = []VisitedCallback{}
+	this.waitCount = 0
+	this.runCount = 0
+	this.wg = &sync.WaitGroup{}
+	this.depth = 0
+
+	if this.queue.Depth() > 0 {
+		this.wg.Add(int(this.queue.Depth()))
 	}
-	ls.waitCount = 0
-	ls.runCount = 0
 
-	ls.request = req.New()
+	this.http = gonet.NewRequest()
 }
 
-func (ls *GoSpider) AddHeader(name, val string) {
-	ls.headerMap[name] = val
-}
-
-func (ls *GoSpider) Visited(visited VisitedCallback) {
-	ls.visitedCallback = visited
-}
-
-func (ls *GoSpider) AddURL(rule string) {
-	ls.urlsRule = append(ls.urlsRule, gohelpers.String.DeepProcessingRegex(rule))
-}
-
-func (ls *GoSpider) Parse(rule string, parseFunc ParseFunc) {
-	ls.parseRule[gohelpers.String.DeepProcessingRegex(rule)] = parseFunc
-}
-
-func (ls *GoSpider) Run() {
+func (this *GoSpider) run() {
 	for {
-		if ls.Queue.Size() == 0 {
-			if ls.waitCount <= 3 {
+		if this.queue.Depth() == 0 {
+			if this.waitCount <= 3 {
+				this.wg.Add(1)
 				time.Sleep(5 * time.Second)
-				ls.waitCount++
+				this.waitCount++
 			} else {
 				goto exit
 			}
 		}
 
-		ls.run()
-		ls.runCount++
+		this.runOne()
+		this.runCount++
 	}
 
 exit:
+	// this.wg = &sync.WaitGroup{}
 	return
 }
 
-func (ls *GoSpider) RunCount() int64 {
-	return ls.runCount
+func (this *GoSpider) putQueue(data []byte) {
+	if err := this.queue.Put(data); err != nil {
+		this.logf(diskqueue.ERROR, "queue put [%s] err: %s", string(data), err.Error())
+		return
+	}
+
+	this.wg.Add(1)
 }
 
-func (ls *GoSpider) run() error {
-	val, ok := ls.Queue.Get()
+func (this *GoSpider) runOne() error {
+	defer this.wg.Done()
+	data, ok := <-this.queue.ReadChan()
 	if !ok {
+		return nil
+	}
+
+	depth, val := this.parseQueueData(data)
+	if depth == 0 || val == "" {
+		return fmt.Errorf("Cannot parse queue data: %s", string(data))
+	}
+
+	if depth > this.depth {
 		return nil
 	}
 
 	url := string(val)
 
-	html, err := ls.getHTML(url)
+	html, err := this.getHTML(url)
 	if err != nil {
 		return err
+	}
+
+	this.handleOnVisit(url, html)
+
+	nextDepth := depth + 1
+	if nextDepth > this.depth+1 {
+		return nil
 	}
 
 	urls := make([]string, 0)
@@ -162,11 +253,7 @@ func (ls *GoSpider) run() error {
 		if err != nil {
 			return err
 		}
-		if ls.visitedCallback(absLink) {
-			continue
-		}
-
-		if _, ok := ls.visitedUrls[absLink]; ok {
+		if this.handleOnVisited(absLink) {
 			continue
 		}
 
@@ -174,38 +261,38 @@ func (ls *GoSpider) run() error {
 	}
 
 	for _, link := range urls {
-		for _, urlRule := range ls.urlsRule {
-			if ls.exactMatch(urlRule, link) {
-				if err := ls.Queue.Put([]byte(link)); err == nil {
-					ls.visitedUrls[link] = true
-				} else {
-					fmt.Sprintf("queue put [%s] err: %s", link, err.Error())
-				}
+		for _, urlRule := range this.urlsRule {
+			if this.exactMatch(urlRule, link) {
+				this.putQueue(this.getQueueData(nextDepth, link))
 			}
-		}
-	}
-
-	for rule, parseFunc := range ls.parseRule {
-		if ls.exactMatch(rule, url) {
-			parseFunc(url, html)
 		}
 	}
 
 	return nil
 }
 
-func (ls *GoSpider) getHTML(url string) (string, error) {
-	// html, err := GetHTMLFromURL(url, ls.Charset, ls.Proxy, ls.headerMap, 30)
-	// if err != nil {
-	// 	fmt.Println("GetHTMLFromURL err: ", err.Error())
-	// 	return
-	// }
+func (this *GoSpider) wgReset() {
+	this.wg = &sync.WaitGroup{}
+}
 
-	return "", nil
+func (this *GoSpider) getHTML(url string) (string, error) {
+	if this.charset != "" {
+		this.http.SetCharacterEncoding(this.charset)
+	}
+	if this.proxy != "" {
+		this.http.SetProxyURL(this.proxy)
+	}
+	if len(this.headerMap) > 0 {
+		for key, value := range this.headerMap {
+			this.http.AddHeader(key, value)
+		}
+	}
+
+	return this.http.GET(url).String()
 }
 
 // 精确匹配
-func (ls *GoSpider) exactMatch(regex, data string) bool {
+func (this *GoSpider) exactMatch(regex, data string) bool {
 	re, err := regexp.Compile(`(?i)` + regex)
 	if err != nil {
 		return false
@@ -213,4 +300,18 @@ func (ls *GoSpider) exactMatch(regex, data string) bool {
 
 	str := re.FindString(data)
 	return strings.EqualFold(str, data)
+}
+
+func (this *GoSpider) getQueueData(depth int, url string) []byte {
+	return []byte(fmt.Sprintf("%d@@%s", depth, url))
+}
+
+func (this *GoSpider) parseQueueData(data []byte) (int, string) {
+	val := string(data)
+	parts := strings.SplitN(val, "@@", 2)
+	if len(parts) != 2 {
+		return 0, ""
+	}
+
+	return gohelpers.Value(parts[0]).Int(), parts[1]
 }
