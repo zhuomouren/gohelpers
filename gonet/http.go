@@ -109,7 +109,7 @@ func (this *Request) String() (string, error) {
 	return this.fixCharset(data)
 }
 
-func (this *Request) ToJSON(v interface{}) error {
+func (this *Request) JSON(v interface{}) error {
 	_, err := this.Bytes()
 	if err != nil {
 		return err
@@ -118,7 +118,7 @@ func (this *Request) ToJSON(v interface{}) error {
 	return json.Unmarshal(this.data, v)
 }
 
-func (this *Request) ToXML(v interface{}) error {
+func (this *Request) XML(v interface{}) error {
 	_, err := this.Bytes()
 	if err != nil {
 		return err
@@ -157,6 +157,11 @@ func (this *Request) Save(fileName string) error {
 	return ioutil.WriteFile(fileName, this.data, 0644)
 }
 
+func (this *Request) SetContentType(contentType string) *Request {
+	this.headers.Set("Content-Type", contentType)
+	return this
+}
+
 func (this *Request) Response() *http.Response {
 	return this.response
 }
@@ -169,6 +174,24 @@ func (this *Request) GET(URL string) *Request {
 // req.POST("http://example.com/login", map[string]string{"username": "admin", "password": "admin"})
 func (this *Request) POST(URL string, requestData map[string]string) *Request {
 	this.err = this.Fetch("POST", URL, createFormReader(requestData), nil, nil)
+	return this
+}
+
+// payload := []byte(`{"user":{"email":"anon@example.com","password":"mypassword"}}`)
+// req.POSTRaw("http://example.com/login", payload)
+func (this *Request) POSTRaw(URL string, requestData []byte) *Request {
+	this.err = this.Fetch("POST", URL, bytes.NewReader(requestData), nil, nil)
+	return this
+}
+
+func (this *Request) SendJSON(URL string, requestData map[string]string) *Request {
+	this.headers.Set("Content-Type", "application/json; charset=UTF-8")
+	data, err := json.Marshal(requestData)
+	if err != nil {
+		this.err = err
+		return this
+	}
+	this.err = this.Fetch("POST", URL, bytes.NewReader(data), nil, nil)
 	return this
 }
 
