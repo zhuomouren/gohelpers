@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/zhuomouren/gohelpers/gonet"
+
 	"github.com/zhuomouren/gohelpers"
 )
 
@@ -17,10 +19,20 @@ type Book struct {
 	Name         string `json:"name"`
 	Author       string `json:"author"`
 	Cover        string `json:"cover"`
+	Category     string `json:"category"`
 	Summary      string `json:"summary"`
-	ChapterCount uint   `json:"chapter_count"`
+	ChapterCount int    `json:"chapter_count"`
 	ReadURL      string `json:"read_url"`
-	Status       uint   `json:"status"`
+	Status       int    `json:"status"`
+}
+
+func GetBook(url string) *Book {
+	html, err := gonet.NewRequest().GET(url).String()
+	if err != nil {
+		return nil
+	}
+
+	return GetBookByOGP(url, html)
 }
 
 func GetBookByOGP(url, html string) *Book {
@@ -59,9 +71,8 @@ func GetBookByOGP(url, html string) *Book {
 		cover, _ = gohelpers.URL.AbsoluteURL(cover, url)
 	}
 	book.Cover = cover
-
+	book.Category = GetOpenGraphProtocol("og:novel:category", html)
 	book.Summary = GetOpenGraphProtocol("og:description", html)
-	// source.Category = GetOpenGraph("og:novel:category", html)
 	status := GetOpenGraphProtocol("og:novel:status", html) // 写作进度
 	if strings.Contains(status, "完") {
 		book.Status = StatusFinished

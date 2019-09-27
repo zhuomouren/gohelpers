@@ -1,317 +1,461 @@
-// goqueue 是由Go语言开发的轻量级队列系统。
 package goqueue
 
 import (
-	"errors"
+	"bytes"
+	"crypto/md5"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"log"
-	"os"
+	"io"
 	"path/filepath"
-	"sync"
 	"time"
 
-	"github.com/nsqio/go-diskqueue"
+	bolt "go.etcd.io/bbolt"
 )
 
-// 对diskqueue的日志类型进一步封装，不对外暴露diskqueue的日志类型
-type LogLevel diskqueue.LogLevel
+var (
+	StoreBucket = []byte("stores")
+	IdsBucket   = []byte("ids")
+	StatBucket  = []byte("stats")
+)
 
-func (l LogLevel) String() string {
-	return diskqueue.LogLevel(l).String()
+type Stats struct {
+	CurrentID int       `json:"current_id"`
+	Size      int       `json:"size"`
+	ReadSize  int       `json:"read_size"`
+	ReplySize int       `json:"reply_size"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (this *Stats) String() string {
+	return fmt.Sprintf("size: %d, read size: %d, reply size: %d, created: %s, updated: %s", this.Size, this.ReadSize, this.ReplySize, this.CreatedAt.String(), this.UpdatedAt.String())
 }
 
 const (
-	DEBUG = diskqueue.DEBUG
-	INFO  = diskqueue.INFO
-	WARN  = diskqueue.WARN
-	ERROR = diskqueue.ERROR
-	FATAL = diskqueue.FATAL
+	StatusPending    = iota // 0
+	StatusProcessing        // 1
+	StatusInvalid           // 2
+	StatusOK                // 3
 )
 
-type LogFunc func(lvl LogLevel, f string, args ...interface{})
-
-const (
-	MIN_MSG_SIZE int32 = 1   // 消息的最小长度
-	MAX_MSG_SIZE int32 = 255 // 消息的最大长度
-)
-
-// goQueue 是对 DiskQueue 的封装，可以在内存和文件系统上切换
-type goQueue struct {
-	sync.RWMutex
-	name            string
-	memoryMaxSize   uint64 // 内存里允许的最大消息数量
-	memoryCount     uint64 // // 当前内存里的消息数量
-	memoryMsgChan   chan []byte
-	exitFlag        bool // 退出标识
-	exitMutex       sync.RWMutex
-	useDisk         bool
-	dataPath        string
-	maxBytesPerFile int64         // 每个磁盘队列文件的字节数
-	syncEvery       int64         // number of writes per fsync
-	syncTimeout     time.Duration // duration of time per fsync
-	backend         diskqueue.Interface
-	logf            diskqueue.AppLogFunc
+type Item struct {
+	ID        int       `json:"id"`
+	Message   string    `json:"message"`
+	Status    int       `json:"status"`
+	Error     string    `json:"error"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// 创建一个新的内存队列实例，并返回指针
-func NewMemory(name string, options ...uint64) *goQueue {
-	this := &goQueue{
-		name:          name,
-		useDisk:       false,
-		memoryMaxSize: 100000, // 默认 10w
-		logf:          logf,
-	}
-
-	if len(options) > 0 {
-		this.memoryMaxSize = options[0]
-	}
-
-	this.memoryMsgChan = make(chan []byte, this.memoryMaxSize)
-	return this
-}
-
-// 创建一个新的goQueue实例，并返回指针
-func New(name string, options ...string) *goQueue {
-	this := &goQueue{
-		name:            name,
-		useDisk:         true,
-		dataPath:        "diskqueue",
-		memoryMaxSize:   0,
-		maxBytesPerFile: 1024 * 1024 * 10, // 默认 10M
-		syncEvery:       1024,             // 2500
-		syncTimeout:     2 * time.Second,
-		logf:            logf,
-	}
-
-	if len(options) > 0 {
-		this.dataPath = options[0]
-	}
-
-	this.backend = diskqueue.New(
-		this.dataPath,
-		this.dataPath,
-		this.maxBytesPerFile,
-		MIN_MSG_SIZE,
-		MAX_MSG_SIZE,
-		this.syncEvery,
-		this.syncTimeout,
-		this.logf,
-	)
-
-	// 创建存储路径
-	if err := this.diskQueuePath(); err != nil {
-		this.logf(ERROR, "GOQUEUE(%s): failed to create directory[%s] - %s",
-			this.name, this.dataPath, err.Error())
-	}
-
-	return this
-}
-
-// 队列存放路径
-func (this *goQueue) DataPath(dataPath string) *goQueue {
-	this.dataPath = dataPath
-	return this
-}
-
-// 每个磁盘队列文件的字节数
-func (this *goQueue) MaxBytesPerFile(maxBytesPerFile int64) *goQueue {
-	this.maxBytesPerFile = maxBytesPerFile
-	return this
-}
-
-// 内存里的消息数
-func (this *goQueue) MemoryMaxSize(memoryMaxSize uint64) *goQueue {
-	this.memoryMaxSize = memoryMaxSize
-	return this
-}
-
-func (this *goQueue) SyncEvery(syncEvery int64) *goQueue {
-	this.syncEvery = syncEvery
-	return this
-}
-
-func (this *goQueue) SyncTimeout(syncTimeout time.Duration) *goQueue {
-	this.syncTimeout = syncTimeout
-	return this
-}
-
-func (this *goQueue) Logf(logf LogFunc) *goQueue {
-	dqLogf := func(lvl diskqueue.LogLevel, f string, args ...interface{}) {
-		logf(LogLevel(lvl), f, args...)
-	}
-
-	this.logf = dqLogf
-	return this
-}
-
-// 返回一个bool，指示此队列是否关闭/退出
-func (this *goQueue) Exiting() bool {
-	return this.exitFlag
-}
-
-// 删除一个队列，如果使用 DiskQueue 持久化，则一并删除
-func (this *goQueue) Delete() error {
-	return this.exit(true)
-}
-
-// 关闭一个队列，不会删除 DiskQueue 持久化的数据
-func (this *goQueue) Close() error {
-	return this.exit(false)
-}
-
-// 退出当前队列，并指示是否删除持久化的数据
-func (this *goQueue) exit(deleted bool) error {
-	this.exitMutex.Lock()
-	defer this.exitMutex.Unlock()
-
-	this.exitFlag = true
-
-	if deleted {
-		this.logf(INFO, "GOQUEUE(%s): deleting", this.name)
-	} else {
-		this.logf(INFO, "GOQUEUE(%s): closing", this.name)
-	}
-
-	this.Empty()
-
-	if !this.useDisk {
-		return nil
-	}
-
-	// 删除持久化数据
-	if deleted {
-		return this.backend.Delete()
-	}
-
-	return this.backend.Close()
-}
-
-// 清空队列
-func (this *goQueue) Empty() error {
-	this.Lock()
-	defer this.Unlock()
-
-	this.memoryCount = 0
-
-	for {
-		select {
-		case <-this.memoryMsgChan:
-		default:
-			goto finish
-		}
-	}
-
-finish:
-	if !this.useDisk {
-		return nil
-	}
-	return this.backend.Empty()
-}
-
-func (this *goQueue) Depth() int64 {
-	if this.useDisk {
-		return this.backend.Depth()
-	} else {
-		return int64(len(this.memoryMsgChan))
+func NewItem(msg string) *Item {
+	return &Item{
+		ID:        0,
+		Message:   msg,
+		Status:    StatusPending,
+		Error:     "",
+		CreatedAt: time.Now(),
 	}
 }
 
-// Depth() 的别名
-func (this *goQueue) Size() int64 {
-	return this.Depth()
-}
-
-// 从队列中读取数据
-func (this *goQueue) Get() ([]byte, bool) {
-	var data []byte
-	var ok bool
-
-	for {
-		select {
-		case data, ok = <-this.ReadChan():
-			this.logf(DEBUG, "GOQUEUE(%s): read a message - %s", this.name, string(data))
-			goto exit
-		default:
-			if this.Depth() > 0 {
-				continue
-			} else {
-				ok = false
-				goto exit
-			}
-		}
+func NewItemFromBytes(data []byte) (*Item, error) {
+	item := &Item{}
+	err := json.Unmarshal(data, item)
+	if err != nil {
+		return nil, err
 	}
 
-exit:
-	return data, ok
+	return item, nil
 }
 
-func (this *goQueue) ReadChan() chan []byte {
-	if this.useDisk {
-		return this.backend.ReadChan()
-	} else {
-		return this.memoryMsgChan
-	}
+func (this *Item) Bytes() ([]byte, error) {
+	return json.Marshal(this)
 }
 
-// 将数据写入队列
-func (this *goQueue) Put(data []byte) error {
-	this.RLock()
-	defer this.RUnlock()
-	if this.Exiting() {
-		return errors.New("exiting")
+func (this *Item) Key() []byte {
+	return itob(this.ID)
+}
+
+type Queue struct {
+	name     string
+	dataPath string
+	db       *bolt.DB
+	stats    *Stats
+}
+
+func New(name, dataPath string) (*Queue, error) {
+	this := &Queue{
+		name:     name,
+		dataPath: dataPath,
 	}
 
-	if this.useDisk {
-		err := this.backend.Put(data)
+	this.stats = &Stats{
+		CurrentID: 0,
+		Size:      0,
+		ReadSize:  0,
+		ReplySize: 0,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	if err := this.initDB(); err != nil {
+		return nil, err
+	}
+
+	return this, nil
+}
+
+func (this *Queue) initDB() error {
+	var err error
+	dbfile := filepath.Join(this.dataPath, this.name)
+	this.db, err = bolt.Open(dbfile, 0600, nil)
+	if err != nil {
+		return err
+	}
+
+	return this.db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists(StoreBucket)
 		if err != nil {
-			this.logf(ERROR, "GOQUEUE(%s): failed to write message to backend - %s", this.name, err)
 			return err
 		}
-	} else {
-		// 如果写入队列的数量超过定义的数量，则丢弃数据，不再继续写入
-		if this.memoryCount >= this.memoryMaxSize {
+
+		_, err = tx.CreateBucketIfNotExists(IdsBucket)
+		if err != nil {
+			return err
+		}
+
+		_, err = tx.CreateBucket(StatBucket)
+		if err == bolt.ErrBucketExists {
+			if err := this.getStats(tx); err != nil {
+				return err
+			}
+		} else {
+			if err := this.saveStats(tx); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+}
+
+func (this *Queue) Get() (string, error) {
+	if this.db == nil {
+		return "", nil
+	}
+
+	var msg string
+	if err := this.db.Update(func(tx *bolt.Tx) error {
+		storeBucket := tx.Bucket(StoreBucket)
+		if this.stats.ReadSize >= storeBucket.Stats().KeyN {
 			return nil
 		}
 
-		this.memoryMsgChan <- data
-		this.memoryCount++
-	}
-
-	return nil
-}
-
-// 创建 DiskQueue 数据的保存路径
-func (this *goQueue) diskQueuePath() error {
-	if !this.useDisk {
-		return nil
-	}
-
-	path := this.dataPath
-	if !filepath.IsAbs(path) {
-		dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+		var data []byte
+		cursor := storeBucket.Cursor()
+		if this.stats.ReadSize == 0 {
+			_, data = cursor.First()
+		} else {
+			cursor.Seek(itob(this.stats.CurrentID))
+			_, data = cursor.Next()
+		}
+		if data == nil {
+			return nil
+		}
+		item, err := NewItemFromBytes(cloneBytes(data))
 		if err != nil {
 			return err
 		}
 
-		path = filepath.Join(dir, path)
+		msg = item.Message
+
+		// 修改状态
+		item.Status = StatusProcessing
+		if err := this.putItem(tx, item); err != nil {
+			return err
+		}
+
+		this.stats.CurrentID = item.ID
+		this.stats.ReadSize++
+		if err := this.saveStats(tx); err != nil {
+			return err
+		}
+
+		return nil
+	}); err != nil {
+		return "", err
 	}
 
-	if _, err := os.Stat(path); err == nil {
+	return msg, nil
+}
+
+func (this *Queue) Put(msg string) error {
+	if this.db == nil {
 		return nil
 	}
 
-	if err := os.MkdirAll(path, 0711); err != nil {
+	if this.Exists(msg) {
+		return nil
+	}
+
+	item := NewItem(msg)
+	return this.db.Update(func(tx *bolt.Tx) error {
+		if err := this.putItem(tx, item); err != nil {
+			return err
+		}
+
+		this.stats.Size++
+		return this.saveStats(tx)
+	})
+}
+
+func (this *Queue) Find(offset, limit int) []*Item {
+	var items []*Item
+	if offset <= 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 10000
+	}
+	if offset > this.stats.Size {
+		return items
+	}
+	if limit > 100000 {
+		limit = 100000
+	}
+	this.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(StoreBucket)
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		if c == nil {
+			return nil
+		}
+
+		i := 0
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			if i >= offset {
+				item, _ := NewItemFromBytes(cloneBytes(v))
+				items = append(items, item)
+			}
+			if len(items) >= limit {
+				return nil
+			}
+			i++
+		}
+
+		return nil
+	})
+
+	return items
+}
+
+func (this *Queue) Size() int {
+	var size int
+
+	this.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(StoreBucket)
+		if b == nil {
+			return nil
+		}
+		size = b.Stats().KeyN
+		return nil
+	})
+
+	return size
+}
+
+func (this *Queue) Exists(msg string) bool {
+	if this.db == nil {
+		return false
+	}
+
+	var ret bool
+	this.db.View(func(tx *bolt.Tx) error {
+		ret = this.visited(tx, msg)
+
+		return nil
+	})
+
+	return ret
+}
+
+func (this *Queue) Reply(msg string, status int, errMsg string) error {
+	if !this.Exists(msg) {
+		return nil
+	}
+
+	if status != StatusOK {
+		status = StatusInvalid
+	}
+	item := NewItem(msg)
+	item.Status = status
+	item.Error = errMsg
+	item.UpdatedAt = time.Now()
+	return this.db.Update(func(tx *bolt.Tx) error {
+		if err := this.putItem(tx, item); err != nil {
+			return err
+		}
+
+		this.stats.ReplySize++
+		return this.saveStats(tx)
+	})
+}
+
+func (this *Queue) ReplyOK(msg string) error {
+	return this.Reply(msg, StatusOK, "")
+}
+
+func (this *Queue) ReplyInvalid(msg, errMsg string) error {
+	return this.Reply(msg, StatusInvalid, errMsg)
+}
+
+func (this *Queue) Stats() *Stats {
+	return this.stats
+}
+
+func (this *Queue) Close() error {
+	return this.db.Close()
+}
+
+func (this *Queue) getStats(tx *bolt.Tx) error {
+	if tx == nil {
+		return nil
+	}
+
+	statBucket := tx.Bucket(StatBucket)
+	data := statBucket.Get(StatBucket)
+
+	if err := json.Unmarshal(cloneBytes(data), this.stats); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// 默认日志函数，只记录 ERROR 和 FATAL 类型
-func logf(lvl diskqueue.LogLevel, f string, args ...interface{}) {
-	//	if lvl < diskqueue.ERROR {
-	//		return
-	//	}
+func (this *Queue) saveStats(tx *bolt.Tx) error {
+	if tx == nil {
+		return nil
+	}
 
-	log.Println(fmt.Sprintf(lvl.String()+": "+f, args...))
+	statBucket := tx.Bucket(StatBucket)
+	this.stats.UpdatedAt = time.Now()
+	data, err := json.Marshal(this.stats)
+	if err != nil {
+		return err
+	}
+
+	if err := statBucket.Put(StatBucket, cloneBytes(data)); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (this *Queue) putItem(tx *bolt.Tx, item *Item) error {
+	if tx == nil {
+		return nil
+	}
+
+	var isAdd bool
+	id, err := this.getID(tx, item.Message)
+	if err != nil {
+		return err
+	}
+	item.ID = id
+
+	storeBucket := tx.Bucket(StoreBucket)
+	if item.ID == 0 {
+		isAdd = true
+		id, err := storeBucket.NextSequence()
+		if err != nil {
+			return err
+		}
+		item.ID = int(id)
+	}
+
+	data, err := item.Bytes()
+	if err != nil {
+		return err
+	}
+
+	if err := storeBucket.Put(itob(item.ID), cloneBytes(data)); err != nil {
+		return err
+	}
+
+	if isAdd {
+		if err := this.storeID(tx, item.Message, item.ID); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (this *Queue) storeID(tx *bolt.Tx, msg string, id int) error {
+	buck := tx.Bucket(IdsBucket)
+	if buck == nil {
+		return nil
+	}
+
+	hBucket, err := buck.CreateBucketIfNotExists(getIdsBucket(msg))
+	if err != nil {
+		return err
+	}
+
+	return hBucket.Put([]byte(msg), itob(id))
+}
+
+func (this *Queue) visited(tx *bolt.Tx, msg string) bool {
+	id, _ := this.getID(tx, msg)
+	return id > 0
+}
+
+func (this *Queue) getID(tx *bolt.Tx, msg string) (int, error) {
+	bucket := tx.Bucket(IdsBucket)
+	if bucket == nil {
+		return 0, nil
+	}
+
+	b := bucket.Bucket(getIdsBucket(msg))
+	if b == nil {
+		return 0, nil
+	}
+	v := b.Get([]byte(msg))
+	if v == nil {
+		return 0, nil
+	}
+
+	return btoi(cloneBytes(v))
+}
+
+func getIdsBucket(str string) []byte {
+	h := md5.New()
+	io.WriteString(h, str)
+	v := hex.EncodeToString(h.Sum(nil))
+	return []byte(v[:2])
+}
+
+func itob(v int) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, uint64(v))
+	return b
+}
+
+func btoi(v []byte) (int, error) {
+	var id int64
+	r := bytes.NewReader(v)
+	err := binary.Read(r, binary.BigEndian, &id)
+	if err != nil {
+		return 0, err
+	}
+	return int(id), nil
+}
+
+func cloneBytes(v []byte) []byte {
+	var clone = make([]byte, len(v))
+	copy(clone, v)
+	return clone
 }
