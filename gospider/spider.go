@@ -1,23 +1,17 @@
 package gospider
 
 import (
-	"crypto/md5"
-	"encoding/hex"
 	"fmt"
-	"io"
-	"log"
-	"os"
-	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/nsqio/go-diskqueue"
+	"github.com/zhuomouren/gohelpers/golog"
 
 	"github.com/zhuomouren/gohelpers"
 	"github.com/zhuomouren/gohelpers/gonet"
+	"github.com/zhuomouren/gohelpers/goqueue"
 
 	bolt "go.etcd.io/bbolt"
 )
@@ -40,7 +34,7 @@ type GoSpider struct {
 	url              string
 	charset          string
 	proxy            string
-	queue            diskqueue.Interface
+	queue            *goqueue.Queue
 	queueDataPath    string
 	urlsRule         []string
 	visitCallbacks   map[string]VisitCallback
@@ -49,7 +43,6 @@ type GoSpider struct {
 	visitedUrls      map[string]bool
 	waitCount        int
 	runCount         int64
-	logf             diskqueue.AppLogFunc
 	http             *gonet.Request
 	lock             *sync.RWMutex
 	depth            int
@@ -57,9 +50,11 @@ type GoSpider struct {
 	exitChan         chan bool
 	db               *bolt.DB
 	status           int
+	sleep            time.Duration
 }
 
 func New(name, url string) *GoSpider {
+	golog.Debug("new gospider [name=%s, url=%s]", name, url)
 	this := &GoSpider{
 		name:   name,
 		url:    url,
@@ -70,14 +65,12 @@ func New(name, url string) *GoSpider {
 	this.headerMap = map[string]string{}
 	this.visitedUrls = make(map[string]bool)
 	this.visitedCallbacks = make([]VisitedCallback, 0)
-	this.waitCount = 0
+	this.waitCount = 1
 	this.runCount = 0
 	this.lock = &sync.RWMutex{}
 	this.depth = 0
-	this.logf = func(lvl diskqueue.LogLevel, f string, args ...interface{}) {
-		log.Println(fmt.Sprintf(lvl.String()+" "+f, args...))
-	}
 	this.exitChan = make(chan bool)
+	this.sleep = 1 * time.Second
 
 	this.http = gonet.NewRequest()
 
@@ -105,6 +98,11 @@ func (this *GoSpider) Proxy(proxy string) *GoSpider {
 
 func (this *GoSpider) Depth(depth int) *GoSpider {
 	this.depth = depth
+	return this
+}
+
+func (this *GoSpider) Sleep(sleep time.Duration) *GoSpider {
+	this.sleep = sleep
 	return this
 }
 
@@ -157,52 +155,57 @@ func (this *GoSpider) handleOnVisited(url string) bool {
 }
 
 func (this *GoSpider) Run() {
+	golog.Info("gospider run")
+	if this.status == StatusExiting {
+		golog.Info("gospider has exited")
+		return
+	}
+
+	// 防止重复运行
 	if this.queue != nil {
+		if this.status == StatusSuspend {
+			this.status = StatusPending
+			go this.run()
+		}
+
 		return
 	}
 
 	if this.queueDataPath == "" {
 		this.queueDataPath = "queuedata"
 	}
-	this.initQueue()
 
-	if this.queue.Depth() == 0 {
+	golog.Debug("gospider init queue")
+	this.initQueue()
+	golog.Debug("gospider init queue completed")
+
+	golog.Debug("gospider queue size: %d", this.queue.Size())
+	if this.queue.Size() == 0 {
+		golog.Debug("add first url")
 		this.putQueue(this.getQueueData(1, this.url))
 	}
 
+	golog.Debug("status is processing")
 	this.status = StatusProcessing
 
 	go this.run()
 }
 
-func (this *GoSpider) Stop() error {
-	// defer func() {
-	// 	this.db.Close()
+func (this *GoSpider) Stop() {
+	golog.Debug("gospider stop")
 	this.status = StatusSuspend
-	// 	this.exitChan <- true
-	// }()
-
-	if err := this.queue.Close(); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func (this *GoSpider) Close() error {
+	golog.Debug("gospider close")
 	defer func() {
-		// this.db.Close()
 		this.status = StatusExiting
 		this.exitChan <- true
+		this.queue = nil
 	}()
 
-	if err := this.queue.Empty(); err != nil {
-		return err
-	}
-	if err := this.db.Close(); err != nil {
-		return err
-	}
-	if err := os.Remove(this.dbfile()); err != nil {
+	if err := this.queue.Close(); err != nil {
+		golog.Error("gospider close err: %s", err.Error())
 		return err
 	}
 
@@ -213,8 +216,8 @@ func (this *GoSpider) RunCount() int64 {
 	return this.runCount
 }
 
-func (this *GoSpider) Size() int64 {
-	return this.queue.Depth()
+func (this *GoSpider) Size() int {
+	return this.queue.Size()
 }
 
 func (this *GoSpider) Status() int {
@@ -227,76 +230,35 @@ func (this *GoSpider) initQueue() {
 		return
 	}
 
-	this.queue = diskqueue.New(
-		this.name,
-		this.queueDataPath,
-		1024*1024*10,
-		10,
-		255,
-		1024,
-		2*time.Second,
-		this.logf,
-	)
-
-	var err error
-	this.db, err = bolt.Open(this.dbfile(), 0600, nil)
+	queue, err := goqueue.New(this.name, this.queueDataPath)
 	if err != nil {
-		this.logf(diskqueue.ERROR, "bbolt err:%s", err.Error())
+		golog.Error("init queue err: %s", err.Error())
 		return
 	}
-}
 
-func (this *GoSpider) dbfile() string {
-	return filepath.Join(this.queueDataPath, "history.db")
-}
-
-func (this *GoSpider) addHistory(url string) error {
-	if this.db == nil {
-		return nil
-	}
-
-	return this.db.Update(func(tx *bolt.Tx) error {
-		b, err := tx.CreateBucketIfNotExists(getBucket(url))
-		if err != nil {
-			fmt.Println("err:", err.Error())
-		}
-
-		return b.Put([]byte(url), []byte(strconv.FormatBool(true)))
-	})
-}
-
-func (this *GoSpider) visited(url string) bool {
-	if this.db == nil {
-		return false
-	}
-
-	var val bool
-	this.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(getBucket(url))
-		if b == nil {
-			return nil
-		}
-		v := b.Get([]byte(url))
-		val = v != nil
-		return nil
-	})
-
-	return val
+	this.queue = queue
 }
 
 func (this *GoSpider) run() {
 	for {
-		if this.queue.Depth() == 0 {
+		if this.status == StatusSuspend {
+			this.exitChan <- true
+			return
+		}
+		if this.status == StatusExiting {
+			goto exit
+		}
+		if this.queue.Size() == 0 {
 			if this.waitCount <= 3 {
+				golog.Info("waiting for %d", this.waitCount)
 				time.Sleep(5 * time.Second)
 				this.waitCount++
-				fmt.Println("this.waitCount: ", this.waitCount)
 			} else {
 				goto exit
 			}
 		} else {
 			if err := this.runOne(); err != nil {
-				this.logf(diskqueue.ERROR, "run err: %s", err.Error())
+				golog.Error("gospider run err: %s", err.Error())
 			}
 			this.runCount++
 		}
@@ -308,36 +270,30 @@ exit:
 	return
 }
 
-func (this *GoSpider) putQueue(data []byte) {
+func (this *GoSpider) putQueue(data string) {
+	golog.Debug("gospider put queue: %s", data)
 	if err := this.queue.Put(data); err != nil {
-		this.logf(diskqueue.ERROR, "queue put [%s] err: %s", string(data), err.Error())
+		golog.Error("gospider put [%s] queue err: %s", data, err.Error())
 		return
 	}
 }
 
 func (this *GoSpider) runOne() error {
-	data, ok := <-this.queue.ReadChan()
-	if !ok {
-		return fmt.Errorf("no data.")
+	data, err := this.queue.Get()
+	if err != nil {
+		return err
 	}
 
-	depth, val := this.parseQueueData(data)
-	if depth == 0 || val == "" {
-		return fmt.Errorf("Cannot parse queue data: %s", string(data))
+	depth, url := this.parseQueueData(data)
+	if depth == 0 || url == "" {
+		return fmt.Errorf("Cannot parse queue data: %s", data)
 	}
 
 	if this.depth > 0 && depth > this.depth {
 		return nil
 	}
 
-	url := string(val)
-	if this.visited(url) {
-		return nil
-	}
-	this.addHistory(url)
-	// if err := this.addHistory(url); err != nil {
-	// 	return err
-	// }
+	time.Sleep(this.sleep)
 	html, err := this.getHTML(url)
 	if err != nil {
 		return err
@@ -367,6 +323,8 @@ func (this *GoSpider) runOne() error {
 
 		urls = append(urls, absLink)
 	}
+
+	gohelpers.String.RemoveDuplicate(&urls)
 
 	for _, link := range urls {
 		for _, urlRule := range this.urlsRule {
@@ -406,23 +364,15 @@ func (this *GoSpider) exactMatch(regex, data string) bool {
 	return strings.EqualFold(str, data)
 }
 
-func (this *GoSpider) getQueueData(depth int, url string) []byte {
-	return []byte(fmt.Sprintf("%d@@%s", depth, url))
+func (this *GoSpider) getQueueData(depth int, url string) string {
+	return fmt.Sprintf("%d@@%s", depth, url)
 }
 
-func (this *GoSpider) parseQueueData(data []byte) (int, string) {
-	val := string(data)
-	parts := strings.SplitN(val, "@@", 2)
+func (this *GoSpider) parseQueueData(data string) (int, string) {
+	parts := strings.SplitN(data, "@@", 2)
 	if len(parts) != 2 {
 		return 0, ""
 	}
 
 	return gohelpers.Value(parts[0]).Int(), parts[1]
-}
-
-func getBucket(url string) []byte {
-	h := md5.New()
-	io.WriteString(h, url)
-	val := hex.EncodeToString(h.Sum(nil))
-	return []byte(val[:2])
 }

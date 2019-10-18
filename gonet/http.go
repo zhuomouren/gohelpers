@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -22,11 +23,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"golang.org/x/net/html/charset"
 )
 
-var DefaultUserAgent string = "abcdefghijklmnopqrstuvwxyz"
+// var DefaultUserAgent string = "abcdefghijklmnopqrstuvwxyz"
+var DefaultUserAgent string = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/77.0.3865.90 Safari/537.36"
 
 var HTTPRequestHelper = NewRequest()
 
@@ -699,6 +702,13 @@ func randomBoundary() string {
 func (this *Request) fixCharset(html string) (string, error) {
 	contentType := ""
 	charset := htmlCharset(html)
+	if charset == "utf-8" || charset == "utf8" {
+		title := htmlTitle(html)
+		if isGarbled(title) {
+			charset = ""
+		}
+	}
+
 	if charset == "" {
 		if this.response == nil {
 			return html, nil
@@ -750,4 +760,40 @@ func htmlCharset(html string) string {
 	}
 
 	return charset
+}
+
+// 获取 HTML Title
+func htmlTitle(html string) string {
+	re, err := regexp.Compile(`(?i)<title>(.*?)</title>`)
+	if err != nil {
+		return ""
+	}
+
+	title := ""
+	ar := re.FindStringSubmatch(html)
+	if len(ar) > 0 {
+		title = strings.ToLower(ar[1])
+	}
+
+	return title
+}
+
+// 是否乱码
+func isGarbled(str string) bool {
+	if str == "" {
+		return false
+	}
+
+	var i, n int
+	ss := []rune(str)
+	var alphaDashPattern = regexp.MustCompile(`[\w]`)
+	for _, s := range ss {
+		isAlpha := alphaDashPattern.MatchString(string(s))
+		if isAlpha || unicode.Is(unicode.Scripts["Han"], s) {
+			n++
+		}
+		i++
+	}
+
+	return n < int(math.Ceil(float64(i)*0.7))
 }

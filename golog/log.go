@@ -5,7 +5,10 @@ import (
 	"log"
 )
 
-var f = logf
+var (
+	Level = DEBUG
+	f     = logf
+)
 
 type LogLevel int
 
@@ -65,9 +68,9 @@ func Logf(lvl LogLevel, format string, args ...interface{}) {
 
 // 默认日志函数
 func logf(lvl LogLevel, f string, args ...interface{}) {
-	//	if lvl < ERROR {
-	//		return
-	//	}
+	if lvl < Level {
+		return
+	}
 
 	log.Println(fmt.Sprintf(lvl.String()+" "+f, args...))
 }

@@ -252,19 +252,26 @@ func (this *Queue) Find(offset, limit int) []*Item {
 	return items
 }
 
+// 返回队列中剩余数量
 func (this *Queue) Size() int {
-	var size int
+	lag := this.stats.Size - this.stats.ReadSize
+	if lag <= 0 {
+		lag = 0
+	}
 
-	this.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(StoreBucket)
-		if b == nil {
-			return nil
-		}
-		size = b.Stats().KeyN
-		return nil
-	})
+	return lag
+	// var size int
 
-	return size
+	// this.db.View(func(tx *bolt.Tx) error {
+	// 	b := tx.Bucket(StoreBucket)
+	// 	if b == nil {
+	// 		return nil
+	// 	}
+	// 	size = b.Stats().KeyN
+	// 	return nil
+	// })
+
+	// return size
 }
 
 func (this *Queue) Exists(msg string) bool {

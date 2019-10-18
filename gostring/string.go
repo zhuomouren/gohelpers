@@ -185,8 +185,14 @@ func (this *GoString) Sub(html, begin, end string) string {
 func (this *GoString) DeepProcessingRegex(regex string) string {
 	regex = strings.Replace(regex, "{数字}", "[0-9]+", -1)
 	regex = strings.Replace(regex, "[数字]", "([0-9]+)", -1)
+	regex = strings.Replace(regex, "{字母}", "[A-Za-z]+", -1)
+	regex = strings.Replace(regex, "[字母]", "([A-Za-z]+)", -1)
+	regex = strings.Replace(regex, "{字母数字}", "[0-9A-Za-z]+", -1)
+	regex = strings.Replace(regex, "[字母数字]", "([0-9A-Za-z]+)", -1)
 	regex = strings.Replace(regex, "{内容}", ".*?", -1)
 	regex = strings.Replace(regex, "[内容]", "(.*?)", -1)
+	regex = strings.Replace(regex, "{URL}", "[^/:]+", -1)
+	regex = strings.Replace(regex, "[URL]", "([^/:]+)", -1)
 
 	return regex
 }

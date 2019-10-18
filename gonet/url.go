@@ -61,6 +61,14 @@ func (this *GoURL) AbsoluteURL(rel, base string) (string, error) {
 		return "", errors.New("Can't start with #")
 	}
 
+	if strings.HasPrefix(rel, "//") {
+		if strings.HasPrefix(base, "https") {
+			return "https:" + rel, nil
+		} else {
+			return "http:" + rel, nil
+		}
+	}
+
 	u, err := url.Parse(rel)
 	if err != nil {
 		return "", err
