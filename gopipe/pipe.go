@@ -31,6 +31,10 @@ func New(tasks []interface{}, worker Worker, concurrency uint) *Pipe {
 		concurrency = 1
 	}
 
+	if concurrency > uint(len(tasks)) {
+		concurrency = uint(len(tasks))
+	}
+
 	this := &Pipe{
 		tasks:       tasks,
 		worker:      worker,

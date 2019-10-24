@@ -18,8 +18,8 @@ var Net = gonet.NetHelper
 var URL = gonet.URLHelper
 var HTTP = gonet.HTTPRequestHelper
 
-func Value(value string) *govalue.GoValue {
-	return govalue.NewGoValue(value)
+func Value(value string) *govalue.Value {
+	return govalue.New(value)
 }
 
 func NewHTTP() *gonet.Request {

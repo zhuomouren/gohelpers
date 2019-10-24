@@ -117,17 +117,25 @@ func (this *GoString) ToUint64(value string) (uint64, error) {
 	return strconv.ParseUint(value, 10, 64)
 }
 
+// 不区分大小写
 func (this *GoString) InSlice(value string, values []string) bool {
-	exists := false
-
 	for _, val := range values {
 		if strings.EqualFold(val, value) {
-			exists = true
-			break
+			return true
 		}
 	}
 
-	return exists
+	return false
+}
+
+// 区分大小写
+func (this *GoString) SliceContains(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func (this *GoString) RemoveSlice(values []string, value string) []string {

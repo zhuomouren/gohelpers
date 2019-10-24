@@ -1,24 +1,17 @@
 package gopipe
 
-// Goroutine票池的接口。
 type Ticket interface {
-	// 拿走一张票。
 	Take()
-	// 归还一张票。
 	Return()
-	// 票池是否已被激活。
 	Active() bool
-	// 票的总数。
 	Total() uint
-	// 剩余的票数。
 	Remainder() uint
 }
 
-// Goroutine票池的实现。
 type ticket struct {
-	total    uint      // 票的总数。
-	ticketCh chan byte // 票的容器。
-	active   bool      // 票池是否已被激活。
+	total    uint
+	ticketCh chan byte
+	active   bool
 }
 
 func NewTicket(total uint) *ticket {
