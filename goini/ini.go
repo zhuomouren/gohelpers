@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/zhuomouren/gohelpers/golog"
 )
 
 var stores = map[string]interface{}{}
@@ -25,15 +25,13 @@ type IniFile struct {
 	autoReload      bool
 	changedCallback func()
 	modTime         int64
-	logLevel        LogLevel // 记录日志的等级
-	logf            LogFunc  // 日志函数
+	logger          *golog.Logger
 }
 
 func New(filepath string, options ...func(*IniFile)) *IniFile {
 	ini := &IniFile{
 		filepath:   filepath,
 		autoReload: true,
-		logLevel:   DEBUG,
 	}
 	ini.initData()
 
@@ -41,14 +39,14 @@ func New(filepath string, options ...func(*IniFile)) *IniFile {
 		f(ini)
 	}
 
-	if ini.logf == nil {
-		ini.logf = ini.log
+	if ini.logger == nil {
+		ini.logger = golog.New("ini")
 	}
 
 	err := ini.parse()
 	if err != nil {
 		ini.initData()
-		ini.logf(ERROR, "parse ini error: %s", err.Error())
+		ini.logger.Error(fmt.Sprintf("parse ini error: %s", err.Error()))
 		return ini
 	}
 
@@ -76,17 +74,10 @@ func OnReload(f func()) func(*IniFile) {
 	}
 }
 
-// 设置日志级别
-func SetLogLevel(logLevel LogLevel) func(*IniFile) {
-	return func(ini *IniFile) {
-		ini.logLevel = logLevel
-	}
-}
-
 // 设置记录日志的函数
-func SetLogFunc(logf LogFunc) func(*IniFile) {
+func SetLogger(log *golog.Logger) func(*IniFile) {
 	return func(ini *IniFile) {
-		ini.logf = logf
+		ini.logger = log
 	}
 }
 
@@ -98,7 +89,8 @@ func (ini *IniFile) Get(key string, def ...interface{}) *Value {
 		}
 	}
 
-	ini.logf(DEBUG, "key[ %s ] does not exist", key)
+	ini.logger.Debug("key does not exist",
+		ini.logger.String("key", key))
 
 	return GetDefault(def...)
 }
@@ -117,19 +109,21 @@ func (ini *IniFile) IsExist(key string) bool {
 
 // 返回配置文件的所有节点
 func (ini *IniFile) Sections() []string {
-	return cfg.sections
+	return ini.sections
 }
 
 // 返回配置文件的所有key
 func (ini *IniFile) Keys() []string {
-	return cfg.keys
+	return ini.keys
 }
 
 // 监控配置文件
 func (ini *IniFile) watcher() {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		ini.logf(ERROR, "fsnotify.NewWatcher error: %s", err)
+		ini.logger.Error("fsnotify error",
+			ini.logger.String("error", err.Error()),
+		)
 		return
 	}
 	defer watcher.Close()
@@ -141,24 +135,28 @@ func (ini *IniFile) watcher() {
 			case event := <-watcher.Events:
 				if event.Op&fsnotify.Write == fsnotify.Write {
 					mt, err := getFileModTime(event.Name)
-					if err != nil {
-						ini.logf(ERROR, err.Error())
-					}
+					ini.logger.Error("fsnotify error",
+						ini.logger.String("error", err.Error()),
+					)
 					if ini.modTime == mt {
 						continue
 					}
 
 					ini.modTime = mt
 					if err := ini.parse(); err != nil {
-						ini.logf(ERROR, "ini parse error: %s", err)
+						ini.logger.Error("ini parse error",
+							ini.logger.String("error", err.Error()),
+						)
 					} else if ini.changedCallback != nil {
-						ini.logf(INFO, "ini file has been modified")
+						ini.logger.Info("ini file has been modified")
 						ini.changedCallback()
 					}
 				}
 			case err := <-watcher.Errors:
 				if err != nil {
-					ini.logf(ERROR, "fsnotify error: %s", err)
+					ini.logger.Error("fsnotify error",
+						ini.logger.String("error", err.Error()),
+					)
 				}
 			}
 		}
@@ -166,7 +164,9 @@ func (ini *IniFile) watcher() {
 
 	err = watcher.Add(ini.filepath)
 	if err != nil {
-		ini.logf(ERROR, "fsnotify error: %s", err)
+		ini.logger.Error("fsnotify error",
+			ini.logger.String("error", err.Error()),
+		)
 	}
 	<-done
 }
@@ -178,7 +178,9 @@ func (ini *IniFile) parse() error {
 	defer ini.Unlock()
 
 	if !fileExist(ini.filepath) {
-		ini.logf(ERROR, "ini file [%s] does not exist.", ini.filepath)
+		ini.logger.Warn("ini file does not exist.",
+			ini.logger.String("file", ini.filepath),
+		)
 		ini.autoReload = false
 		return nil
 	}
@@ -188,6 +190,8 @@ func (ini *IniFile) parse() error {
 		return err
 	}
 	defer f.Close()
+
+	ini.logger.Info("parse ini file")
 
 	data := []map[string]string{}
 	keys := []string{}
@@ -246,7 +250,7 @@ func (ini *IniFile) parse() error {
 			val = strings.Replace(val, `\"`, `"`, -1)
 		}
 
-		ini.logf(DEBUG, "%s = %s", key, val)
+		ini.logger.Debug("parse file info", ini.logger.String(key, val))
 
 		item := map[string]string{
 			key: val,
@@ -258,9 +262,11 @@ func (ini *IniFile) parse() error {
 
 	ini.data, ini.sections, ini.keys = data, sections, keys
 
-	ini.logf(DEBUG, "count: %d", len(ini.data))
-	ini.logf(DEBUG, "sections: %d", len(ini.sections))
-	ini.logf(DEBUG, "keys: %d", len(ini.keys))
+	ini.logger.Debug("ini file info",
+		ini.logger.Int("count", len(ini.data)),
+		ini.logger.Int("sections", len(ini.sections)),
+		ini.logger.Int("keys", len(ini.keys)),
+	)
 
 	return nil
 }
@@ -270,15 +276,6 @@ func (ini *IniFile) initData() {
 	ini.data = []map[string]string{}
 	ini.keys = []string{}
 	ini.sections = []string{}
-}
-
-// 默认的日志记录函数
-func (ini *IniFile) log(logLevel LogLevel, f string, args ...interface{}) {
-	if logLevel < ini.logLevel {
-		return
-	}
-
-	log.Println(fmt.Sprintf(logLevel.String()+": "+f, args...))
 }
 
 // 判断文件是否存在

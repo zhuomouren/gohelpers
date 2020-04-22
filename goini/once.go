@@ -8,13 +8,13 @@ import (
 
 var (
 	once sync.Once
-	cfg  *IniFile
+	std  *IniFile
 
 	RootPath   string
 	ConfigFile string = "app.conf"
 )
 
-func init() {
+func new() *IniFile {
 	once.Do(func() {
 		var err error
 
@@ -28,22 +28,24 @@ func init() {
 		if !fileExist(path) {
 			path = filepath.Join(RootPath, ConfigFile)
 		}
-		cfg = New(path, SetLogLevel(ERROR))
+		std = New(path)
 	})
+
+	return std
 }
 
 func Get(key string, def ...interface{}) *Value {
-	return cfg.Get(key, def...)
+	return new().Get(key, def...)
 }
 
 func IsExist(key string) bool {
-	return cfg.IsExist(key)
+	return new().IsExist(key)
 }
 
 func Sections() []string {
-	return cfg.Sections()
+	return new().Sections()
 }
 
 func Keys() []string {
-	return cfg.Keys()
+	return new().Keys()
 }

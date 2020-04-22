@@ -97,11 +97,63 @@ func GetSourcesByBaidu(name string) ([]*Source, error) {
 	var sources []*Source
 	url := "https://www.baidu.com/s?wd=" + url.QueryEscape(name+"最新章节列表")
 
-	data, err := gonet.NewRequest().GET(url).String()
+	data, err := gonet.NewRequest().SetUserAgent("Mozilla/5.0 (Windows NT 6.2; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/27.0.1453.94 Safari/537.36").GET(url).String()
+	if err != nil {
+		return nil, err
+	}
+	root, err := html.Parse(strings.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
 
+	var linkNodes func(*html.Node)
+	linkNodes = func(n *html.Node) {
+		if n.Type == html.ElementNode && strings.ToLower(n.Data) == "a" {
+			attr := getAttribute(n, "data-click")
+			href := getAttribute(n, "href")
+			title := getInnerText(n)
+			if attr != "" && strings.Contains(href, "link?url=") && strings.Contains(title, name) {
+				sources = append(sources, &Source{Title: title, URL: href})
+			}
+		}
+
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			linkNodes(c)
+		}
+	}
+	linkNodes(root)
+
+	iNum := len(sources)
+	if iNum >= 50 {
+		iNum = 50
+	}
+
+	wg := &sync.WaitGroup{}
+	for i := 0; i < iNum; i++ {
+		wg.Add(1)
+		go GetOriginalUrlFromBaiduLink(sources[i], wg)
+	}
+	wg.Wait()
+
+	var results []*Source
+	for _, source := range sources {
+		if source.URL != "" && !isIgnore(source.URL) && getPath(source.URL) != "" {
+			results = append(results, source)
+		}
+	}
+
+	return results, nil
+}
+
+
+func GetSourcesFromBing(name string) ([]*Source, error) {
+	var sources []*Source
+	url := "https://www.baidu.com/s?wd=" + url.QueryEscape(name+"最新章节列表")
+
+	data, err := gonet.NewRequest().SetUserAgent("Mozilla/5.0 (Windows NT 6.2; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/27.0.1453.94 Safari/537.36").GET(url).String()
+	if err != nil {
+		return nil, err
+	}
 	root, err := html.Parse(strings.NewReader(data))
 	if err != nil {
 		return nil, err

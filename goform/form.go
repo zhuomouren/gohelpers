@@ -1,4 +1,4 @@
-package gohelpers
+package goform
 
 import (
 	"fmt"
@@ -7,18 +7,16 @@ import (
 	"strings"
 )
 
-// assert an object must be a struct pointer
-func panicAssertStructPtr(val reflect.Value) error {
-	if val.Kind() == reflect.Ptr && val.Elem().Kind() == reflect.Struct {
-		return nil
-	}
+type goform struct {
+}
 
-	return fmt.Errorf("%s must be a struct pointer", val.Type().Name())
+func New() *goform {
+	return &goform{}
 }
 
 // set values from one struct to other struct
 // both need ptr struct
-func SetFormValues(from interface{}, to interface{}, skips ...string) error {
+func (this *goform) SetValues(from interface{}, to interface{}, skips ...string) error {
 	val := reflect.ValueOf(from)
 	elm := reflect.Indirect(val)
 
@@ -98,7 +96,7 @@ outFor:
 
 // compare field values between two struct pointer
 // return changed field names
-func FormChanges(base interface{}, modified interface{}, skips ...string) (fields []string, err error) {
+func (this *goform) Changes(base interface{}, modified interface{}, skips ...string) (fields []string, err error) {
 	val := reflect.ValueOf(base)
 	elm := reflect.Indirect(val)
 
@@ -146,4 +144,13 @@ outFor:
 	}
 
 	return
+}
+
+// assert an object must be a struct pointer
+func panicAssertStructPtr(val reflect.Value) error {
+	if val.Kind() == reflect.Ptr && val.Elem().Kind() == reflect.Struct {
+		return nil
+	}
+
+	return fmt.Errorf("%s must be a struct pointer", val.Type().Name())
 }

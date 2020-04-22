@@ -24,6 +24,10 @@ const (
 	StatusInvalid
 )
 
+var (
+	logger = golog.New("gospider")
+)
+
 type VisitCallback func(url, html string)
 
 // 已经采集过的 URL，将不会放入队列
@@ -54,7 +58,10 @@ type GoSpider struct {
 }
 
 func New(name, url string) *GoSpider {
-	golog.Debug("new gospider [name=%s, url=%s]", name, url)
+	logger.Debug("new gospider",
+		logger.String("name", name),
+		logger.String("url", url),
+	)
 	this := &GoSpider{
 		name:   name,
 		url:    url,
@@ -133,7 +140,17 @@ func (this *GoSpider) OnVisit(rule string, f VisitCallback) {
 func (this *GoSpider) handleOnVisit(url, html string) {
 	for rule, f := range this.visitCallbacks {
 		if this.exactMatch(rule, url) {
+			logger.Debug("match url",
+				logger.String("url", url),
+				logger.String("match", "yes"),
+				logger.String("rule", rule),
+			)
 			f(url, html)
+		} else {
+			logger.Debug("match url",
+				logger.String("url", url),
+				logger.String("match", "yes"),
+			)
 		}
 	}
 }
@@ -155,9 +172,13 @@ func (this *GoSpider) handleOnVisited(url string) bool {
 }
 
 func (this *GoSpider) Run() {
-	golog.Info("gospider run")
+	logger.Info("gospider run",
+		logger.String("name", this.name),
+	)
 	if this.status == StatusExiting {
-		golog.Info("gospider has exited")
+		logger.Info("gospider has exited",
+			logger.String("name", this.name),
+		)
 		return
 	}
 
@@ -175,29 +196,45 @@ func (this *GoSpider) Run() {
 		this.queueDataPath = "queuedata"
 	}
 
-	golog.Debug("gospider init queue")
+	logger.Debug("gospider init queue",
+		logger.String("name", this.name),
+	)
 	this.initQueue()
-	golog.Debug("gospider init queue completed")
+	logger.Debug("gospider init queue completed",
+		logger.String("name", this.name),
+	)
 
-	golog.Debug("gospider queue size: %d", this.queue.Size())
+	logger.Debug("gospider queue info: %d",
+		logger.String("name", this.name),
+		logger.Int("size", this.queue.Size()),
+	)
 	if this.queue.Size() == 0 {
-		golog.Debug("add first url")
+		logger.Debug("add first url",
+			logger.String("name", this.name),
+			logger.String("url", this.url),
+		)
 		this.putQueue(this.getQueueData(1, this.url))
 	}
 
-	golog.Debug("status is processing")
+	logger.Debug("status is processing",
+		logger.String("name", this.name),
+	)
 	this.status = StatusProcessing
 
 	go this.run()
 }
 
 func (this *GoSpider) Stop() {
-	golog.Debug("gospider stop")
+	logger.Debug("gospider stop",
+		logger.String("name", this.name),
+	)
 	this.status = StatusSuspend
 }
 
 func (this *GoSpider) Close() error {
-	golog.Debug("gospider close")
+	logger.Debug("gospider close",
+		logger.String("name", this.name),
+	)
 	defer func() {
 		this.status = StatusExiting
 		this.exitChan <- true
@@ -205,7 +242,10 @@ func (this *GoSpider) Close() error {
 	}()
 
 	if err := this.queue.Close(); err != nil {
-		golog.Error("gospider close err: %s", err.Error())
+		logger.Error("gospider close error",
+			logger.String("name", this.name),
+			logger.String("error", err.Error()),
+		)
 		return err
 	}
 
@@ -232,7 +272,10 @@ func (this *GoSpider) initQueue() {
 
 	queue, err := goqueue.New(this.name, this.queueDataPath)
 	if err != nil {
-		golog.Error("init queue err: %s", err.Error())
+		logger.Error("init queue error",
+			logger.String("name", this.name),
+			logger.String("error", err.Error()),
+		)
 		return
 	}
 
@@ -250,7 +293,9 @@ func (this *GoSpider) run() {
 		}
 		if this.queue.Size() == 0 {
 			if this.waitCount <= 3 {
-				golog.Info("waiting for %d", this.waitCount)
+				logger.Info("waiting for times",
+					logger.Int("times", this.waitCount),
+				)
 				time.Sleep(5 * time.Second)
 				this.waitCount++
 			} else {
@@ -258,22 +303,35 @@ func (this *GoSpider) run() {
 			}
 		} else {
 			if err := this.runOne(); err != nil {
-				golog.Error("gospider run err: %s", err.Error())
+				logger.Error("gospider run error",
+					logger.String("name", this.name),
+					logger.String("error", err.Error()),
+				)
 			}
 			this.runCount++
 		}
 	}
 
 exit:
+	logger.Info("exiting ...",
+		logger.String("name", this.name),
+	)
 	this.status = StatusExiting
 	this.exitChan <- true
 	return
 }
 
 func (this *GoSpider) putQueue(data string) {
-	golog.Debug("gospider put queue: %s", data)
+	logger.Debug("gospider put queue",
+		logger.String("name", this.name),
+		logger.String("data", data),
+	)
 	if err := this.queue.Put(data); err != nil {
-		golog.Error("gospider put [%s] queue err: %s", data, err.Error())
+		logger.Error("gospider put queue error",
+			logger.String("name", this.name),
+			logger.String("data", data),
+			logger.String("error", err.Error()),
+		)
 		return
 	}
 }
@@ -311,12 +369,14 @@ func (this *GoSpider) runOne() error {
 	if err != nil {
 		return nil
 	}
+
 	for _, link := range links {
 		absLink, err := gohelpers.URL.AbsoluteURL(link, url)
 		if err != nil {
 			// return err
 			continue
 		}
+
 		if this.handleOnVisited(absLink) {
 			continue
 		}
@@ -325,7 +385,7 @@ func (this *GoSpider) runOne() error {
 	}
 
 	gohelpers.String.RemoveDuplicate(&urls)
-
+	// fmt.Println("urls:", urls)
 	for _, link := range urls {
 		for _, urlRule := range this.urlsRule {
 			if this.exactMatch(urlRule, link) {

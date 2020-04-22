@@ -5,11 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/catinello/base62"
 	"github.com/google/uuid"
+	"github.com/sony/sonyflake"
 )
 
 type GoString struct{}
@@ -18,6 +21,21 @@ var Helper = &GoString{}
 
 func (this *GoString) UUID() string {
 	return uuid.New().String()
+}
+
+func (this *GoString) ShortUUID() string {
+	flake := sonyflake.NewSonyflake(sonyflake.Settings{})
+	id, err := flake.NextID()
+	if err != nil {
+		log.Printf("flake.NextID() failed with %s\n", err)
+		return this.UUID()
+	}
+
+	// 16 进制
+	// return fmt.Sprintf("%x", id)
+
+	// 使用 base62 编码更短
+	return base62.Encode(int(id))
 }
 
 // 单位转换
