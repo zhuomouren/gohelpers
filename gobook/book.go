@@ -93,7 +93,7 @@ func GetOpenGraphProtocol(tag, html string) string {
 	og := ""
 	ret := re.FindStringSubmatch(html)
 	if len(ret) == 3 {
-		og = strings.ToLower(ret[2])
+		og = strings.TrimSpace(ret[2])
 	}
 
 	return og

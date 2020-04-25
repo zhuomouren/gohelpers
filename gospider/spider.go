@@ -24,6 +24,10 @@ const (
 	StatusInvalid
 )
 
+const (
+	sep = "@@"
+)
+
 var (
 	logger = golog.New("gospider")
 )
@@ -55,6 +59,7 @@ type GoSpider struct {
 	db               *bolt.DB
 	status           int
 	sleep            time.Duration
+	sep              string
 }
 
 func New(name, url string) *GoSpider {
@@ -78,6 +83,7 @@ func New(name, url string) *GoSpider {
 	this.depth = 0
 	this.exitChan = make(chan bool)
 	this.sleep = 1 * time.Second
+	this.sep = sep
 
 	this.http = gonet.NewRequest()
 
@@ -279,6 +285,10 @@ func (this *GoSpider) initQueue() {
 		return
 	}
 
+	if len(this.sep) > 0 {
+		queue.SetSeparator(this.sep)
+	}
+
 	this.queue = queue
 }
 
@@ -425,11 +435,11 @@ func (this *GoSpider) exactMatch(regex, data string) bool {
 }
 
 func (this *GoSpider) getQueueData(depth int, url string) string {
-	return fmt.Sprintf("%d@@%s", depth, url)
+	return fmt.Sprintf("%d%s%s", depth, this.sep, url)
 }
 
 func (this *GoSpider) parseQueueData(data string) (int, string) {
-	parts := strings.SplitN(data, "@@", 2)
+	parts := strings.SplitN(data, this.sep, 2)
 	if len(parts) != 2 {
 		return 0, ""
 	}

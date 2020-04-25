@@ -65,6 +65,11 @@ func (this GoFile) Put(filename string, content []byte) error {
 	return ioutil.WriteFile(filename, content, os.ModePerm)
 }
 
+// 删除文件
+func (this GoFile) Remove(path string) error {
+	return os.Remove(path)
+}
+
 // filenameSafe returns whether all characters in s are printable ASCII
 // and safe to use in a filename on most filesystems.
 func (this GoFile) FilenameSafe(s string) bool {

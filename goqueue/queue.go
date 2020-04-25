@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -78,10 +79,11 @@ func (this *Item) Key() []byte {
 }
 
 type Queue struct {
-	name     string
-	dataPath string
-	db       *bolt.DB
-	stats    *Stats
+	name      string
+	dataPath  string
+	db        *bolt.DB
+	stats     *Stats
+	separator string
 }
 
 func New(name, dataPath string) (*Queue, error) {
@@ -138,6 +140,12 @@ func (this *Queue) initDB() error {
 
 		return nil
 	})
+}
+
+// 仅用于判断消息是否存在
+// 如果设置分隔符，会用分隔符切割，取分隔后的最后一段作为消息，判断消息是否存在
+func (this *Queue) SetSeparator(separator string) {
+	this.separator = separator
 }
 
 func (this *Queue) Get() (string, error) {
@@ -277,6 +285,11 @@ func (this *Queue) Size() int {
 func (this *Queue) Exists(msg string) bool {
 	if this.db == nil {
 		return false
+	}
+
+	if len(this.separator) > 0 {
+		arr := strings.Split(msg, this.separator)
+		msg = arr[len(arr)-1]
 	}
 
 	var ret bool

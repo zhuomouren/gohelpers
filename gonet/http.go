@@ -135,7 +135,7 @@ func (this *Request) Save(fileName string) error {
 		return this.err
 	}
 
-	f, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	f, err := os.Create(fileName)
 	if err != nil {
 		return err
 	}
@@ -156,8 +156,7 @@ func (this *Request) Save(fileName string) error {
 
 	defer this.response.Body.Close()
 	_, err = io.Copy(f, this.response.Body)
-
-	return ioutil.WriteFile(fileName, this.data, 0644)
+	return err
 }
 
 func (this *Request) SetContentType(contentType string) *Request {

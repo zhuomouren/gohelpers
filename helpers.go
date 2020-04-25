@@ -21,7 +21,7 @@ var HTTP = gonet.HTTPRequestHelper
 
 var Form = goform.New()
 
-func Value(value string) *govalue.Value {
+func Value(value interface{}) *govalue.Value {
 	return govalue.New(value)
 }
 
