@@ -22,6 +22,7 @@ const (
 	StatusSuspend
 	StatusExiting
 	StatusInvalid
+	StatusStoped
 )
 
 const (
@@ -60,6 +61,7 @@ type GoSpider struct {
 	status           int
 	sleep            time.Duration
 	sep              string
+	errorCount       int
 }
 
 func New(name, url string) *GoSpider {
@@ -84,6 +86,7 @@ func New(name, url string) *GoSpider {
 	this.exitChan = make(chan bool)
 	this.sleep = 1 * time.Second
 	this.sep = sep
+	this.errorCount = 0
 
 	this.http = gonet.NewRequest()
 
@@ -189,7 +192,7 @@ func (this *GoSpider) Run() {
 	}
 
 	// 防止重复运行
-	if this.queue != nil {
+	if this.queue != nil && this.status != StatusStoped {
 		if this.status == StatusSuspend {
 			this.status = StatusPending
 			go this.run()
@@ -241,11 +244,14 @@ func (this *GoSpider) Close() error {
 	logger.Debug("gospider close",
 		logger.String("name", this.name),
 	)
+
 	defer func() {
-		this.status = StatusExiting
+		this.status = StatusStoped
 		this.exitChan <- true
 		this.queue = nil
 	}()
+
+	this.status = StatusExiting
 
 	if err := this.queue.Close(); err != nil {
 		logger.Error("gospider close error",
@@ -294,11 +300,14 @@ func (this *GoSpider) initQueue() {
 
 func (this *GoSpider) run() {
 	for {
-		if this.status == StatusSuspend {
+		if this.status == StatusSuspend || this.status == StatusStoped {
 			this.exitChan <- true
 			return
 		}
 		if this.status == StatusExiting {
+			goto exit
+		}
+		if this.errorCount >= 28 {
 			goto exit
 		}
 		if this.queue.Size() == 0 {
@@ -313,10 +322,13 @@ func (this *GoSpider) run() {
 			}
 		} else {
 			if err := this.runOne(); err != nil {
+				this.errorCount++
 				logger.Error("gospider run error",
 					logger.String("name", this.name),
 					logger.String("error", err.Error()),
 				)
+			} else {
+				this.errorCount = 0
 			}
 			this.runCount++
 		}

@@ -4,8 +4,10 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -23,8 +25,55 @@ func (this *GoString) UUID() string {
 	return uuid.New().String()
 }
 
+var flake = NewSonyflake()
+
+// fix no private ip address error
+func NewSonyflake() *sonyflake.Sonyflake {
+	st := sonyflake.Settings{}
+	st.MachineID = func() (uint16, error) {
+		ip, err := privateIPv4()
+		if err != nil {
+			ip = net.IP([]byte{192, 168, 1, 1})
+		}
+
+		return uint16(ip[2])<<8 + uint16(ip[3]), nil
+	}
+
+	return sonyflake.NewSonyflake(st)
+}
+
+func privateIPv4() (net.IP, error) {
+	as, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, a := range as {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet.IP.IsLoopback() {
+			continue
+		}
+
+		ip := ipnet.IP.To4()
+		if isPrivateIPv4(ip) {
+			return ip, nil
+		}
+	}
+	return nil, errors.New("no private ip address")
+}
+
+func isPrivateIPv4(ip net.IP) bool {
+	return ip != nil &&
+		(ip[0] == 10 || ip[0] == 172 && (ip[1] >= 16 && ip[1] < 32) || ip[0] == 192 && ip[1] == 168)
+}
+
 func (this *GoString) ShortUUID() string {
-	flake := sonyflake.NewSonyflake(sonyflake.Settings{})
+	// flake := sonyflake.NewSonyflake(sonyflake.Settings{})
+	if flake == nil {
+		log.Println("sonyflake is nil")
+		return this.UUID()
+	}
+
 	id, err := flake.NextID()
 	if err != nil {
 		log.Printf("flake.NextID() failed with %s\n", err)
