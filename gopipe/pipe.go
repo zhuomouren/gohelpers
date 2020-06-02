@@ -1,3 +1,24 @@
+// func main() {
+// 	rand.Seed(time.Now().Unix())
+
+// 	var data []interface{}
+// 	for i := 0; i < 50; i++ {
+// 		data = append(data, "http://www.buxutoukan.com")
+// 	}
+
+// 	fmt.Println("start ...")
+// 	t1 := time.Now()
+// 	gopipe.New(data, get, 1).Start().Wait()
+// 	elapsed := time.Since(t1)
+// 	fmt.Println("elapsed: ", elapsed)
+// 	fmt.Println("ok.")
+// }
+
+// func get(val interface{}) error {
+// 	url := val.(string)
+// 	return gohelpers.HTTP.GET(url).Error()
+// }
+
 package gopipe
 
 import (

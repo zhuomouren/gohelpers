@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tidwall/gjson"
+
 	"github.com/zhuomouren/gohelpers/gonet"
 	"golang.org/x/net/html"
 )
@@ -97,10 +99,11 @@ func GetSourcesByBaidu(name string) ([]*Source, error) {
 	var sources []*Source
 	url := "https://www.baidu.com/s?wd=" + url.QueryEscape(name+"最新章节列表")
 
-	data, err := gonet.NewRequest().SetUserAgent("Mozilla/5.0 (Windows NT 6.2; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/27.0.1453.94 Safari/537.36").GET(url).String()
+	data, err := gonet.NewRequest().AddHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9").SetUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.122 Safari/537.36").GET(url).String()
 	if err != nil {
 		return nil, err
 	}
+
 	root, err := html.Parse(strings.NewReader(data))
 	if err != nil {
 		return nil, err
@@ -108,12 +111,14 @@ func GetSourcesByBaidu(name string) ([]*Source, error) {
 
 	var linkNodes func(*html.Node)
 	linkNodes = func(n *html.Node) {
-		if n.Type == html.ElementNode && strings.ToLower(n.Data) == "a" {
-			attr := getAttribute(n, "data-click")
-			href := getAttribute(n, "href")
-			title := getInnerText(n)
-			if attr != "" && strings.Contains(href, "link?url=") && strings.Contains(title, name) {
-				sources = append(sources, &Source{Title: title, URL: href})
+		if n.Type == html.ElementNode && strings.ToLower(n.Data) == "div" {
+			attr := getAttribute(n, "data-tools")
+			if attr != "" && strings.Contains(attr, "title") && strings.Contains(attr, "url") && strings.Contains(attr, "link?url") {
+				title := gjson.Get(attr, "title").String()
+				url := gjson.Get(attr, "url").String()
+				if title != "" && strings.Contains(url, "link?url=") {
+					sources = append(sources, &Source{Title: title, URL: url})
+				}
 			}
 		}
 
@@ -144,7 +149,6 @@ func GetSourcesByBaidu(name string) ([]*Source, error) {
 
 	return results, nil
 }
-
 
 func GetSourcesFromBing(name string) ([]*Source, error) {
 	var sources []*Source
