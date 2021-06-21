@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/zhuomouren/gohelpers/gostring"
@@ -90,6 +91,7 @@ type AssetFS struct {
 	allowedExts []string
 	blockedExts []string
 	files       map[string]*AssetFile
+	mux         *sync.Mutex
 }
 
 func NewAssetFS(path string, allowedExts, blockedExts []string) *AssetFS {
@@ -97,6 +99,7 @@ func NewAssetFS(path string, allowedExts, blockedExts []string) *AssetFS {
 		path:        path,
 		allowedExts: allowedExts,
 		blockedExts: blockedExts,
+		mux:         &sync.Mutex{},
 	}
 	assetFS.files = make(map[string]*AssetFile, 0)
 
@@ -104,6 +107,9 @@ func NewAssetFS(path string, allowedExts, blockedExts []string) *AssetFS {
 }
 
 func (this *AssetFS) Open(name string) (http.File, error) {
+	this.mux.Lock()
+	defer this.mux.Unlock()
+
 	key := cleanJoinPath(this.path, name)
 	ext := filepath.Ext(key)
 	if gostring.Helper.InSlice(ext, this.blockedExts) {

@@ -52,6 +52,8 @@ func NewFont(text string, size float64, color string, file string) Font {
 
 type logo struct {
 	fonts           []Font
+	width           int
+	height          int
 	spacing         int // 间距
 	backgroundColor color.Color
 }
@@ -69,6 +71,16 @@ func (this *logo) AddText(text string, size float64, color string, file string) 
 
 func (this *logo) AddFont(font Font) *logo {
 	this.fonts = append(this.fonts, font)
+	return this
+}
+
+func (this *logo) SetWidth(width int) *logo {
+	this.width = width
+	return this
+}
+
+func (this *logo) SetHeight(height int) *logo {
+	this.height = height
 	return this
 }
 
@@ -90,6 +102,42 @@ func (this *logo) Save(imgPath string) error {
 	}
 
 	return this.SavePNG(img, imgPath)
+}
+
+func (this *logo) GetWrapImage() (image.Image, error) {
+	img, err := this.GetImage()
+	if err != nil {
+		return nil, err
+	}
+
+	if this.width <= 0 || this.height <= 0 {
+		return img, nil
+	}
+
+	r := img.Bounds()
+	imgW := r.Dx()
+	imgH := r.Dy()
+	if imgW > this.width || imgH > this.height {
+		return img, nil
+	}
+
+	//创建新图层
+	canvas := image.NewNRGBA(image.Rect(0, 0, this.width, this.height))
+	draw.Draw(canvas, canvas.Bounds(), image.NewUniform(this.backgroundColor), image.ZP, draw.Src)
+
+	var x, y int
+
+	x = int(math.Floor(float64((this.width - imgW) / 2)))
+	y = int(math.Floor(float64((this.height - imgH) / 2)))
+
+	//image.ZP代表Point结构体，目标的源点，即(0,0)
+	//draw.Src 源图像透过遮罩后，替换掉目标图像
+	//draw.Over 源图像透过遮罩后，覆盖在目标图像上（类似图层）
+
+	rect := image.Rect(x, y, x+imgW, y+imgH)
+	draw.Draw(canvas, rect, img, image.ZP, draw.Over)
+
+	return canvas, nil
 }
 
 // 保存为png格式
